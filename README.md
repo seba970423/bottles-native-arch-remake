@@ -137,3 +137,7 @@ its package.
 This package is an unofficial native build. Bottles upstream officially targets
 its sandboxed distributions, so native-only problems belong in this packaging
 project rather than upstream unless reproduced in an official build.
+
+## License
+
+MIT License
