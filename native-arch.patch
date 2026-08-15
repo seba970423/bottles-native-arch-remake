@@ -1,0 +1,905 @@
+diff --git a/bottles/backend/managers/manager.py b/bottles/backend/managers/manager.py
+index 5e1b59a..d21ccfc 100644
+--- a/bottles/backend/managers/manager.py
++++ b/bottles/backend/managers/manager.py
+@@ -431,6 +431,45 @@ class Manager(metaclass=Singleton):
+             return None
+         return self.umu_executor
+ 
++    def set_umu_data_path(self, value: str) -> Result:
++        """Switch the managed UMU repository before any games are created."""
++        if self.umu_repository.list_games():
++            return Result(
++                False,
++                message=_("The UMU data folder cannot be changed while it contains games."),
++            )
++        if self.__has_active_umu_processes():
++            return Result(
++                False,
++                message=_("Stop all UMU games before changing the UMU data folder."),
++            )
++
++        candidate = os.path.abspath(os.path.expanduser(value))
++        if not os.path.isdir(candidate) or not os.access(candidate, os.W_OK):
++            return Result(False, message=_("Select an existing writable folder."))
++
++        repository = UmuGameRepository(candidate)
++        database = UmuDatabaseClient(repository.root / "cache" / "umu-database.json")
++        executor = None
++        if self._umu_installation is not None:
++            executor = UmuExecutor(
++                self._umu_installation,
++                data_root=repository.root,
++                proton_resolver=self.umu_proton_catalog.resolve_value,
++            )
++
++        # Keep the repository object itself stable because list/preferences views
++        # hold references to it. Change its validated roots only after all new
++        # state has been constructed successfully.
++        self.umu_repository.root = repository.root
++        self.umu_repository.games_root = repository.games_root
++        self.umu_repository.prefixes_root = repository.prefixes_root
++        self.settings.set_string("umu-data-path", str(repository.root))
++        self.umu_database = database
++        self.umu_executor = executor
++        self.umu_error = ""
++        return Result(True, data=self.umu_repository)
++
+     def install_umu_dependencies(
+         self,
+         game,
+diff --git a/bottles/backend/umu/executor.py b/bottles/backend/umu/executor.py
+index 55319f0..f30d8b7 100644
+--- a/bottles/backend/umu/executor.py
++++ b/bottles/backend/umu/executor.py
+@@ -1,5 +1,6 @@
+ import os
+ import re
++import shutil
+ import signal
+ import subprocess
+ import sys
+@@ -149,16 +150,73 @@ class UmuExecutor:
+             if game.working_directory
+             else None
+         )
++        argv = (
++            str(self.installation.path),
++            str(executable),
++            *game.arguments,
++        )
++        backend = game.extra.get("performance_backend", "gamemode")
++        if backend in ("gamemode", "both"):
++            gamemoderun = shutil.which("gamemoderun")
++            if gamemoderun:
++                argv = (gamemoderun, *argv)
++            else:
++                print(
++                    "Bottles: Feral GameMode was selected but gamemoderun "
++                    "is unavailable; launching without it.",
++                    file=sys.stderr,
++                )
+         return UmuCommand(
+-            argv=(
+-                str(self.installation.path),
+-                str(executable),
+-                *game.arguments,
+-            ),
++            argv=argv,
+             env=self._environment(game, prefix_only=False),
+             cwd=cwd,
+         )
+ 
++    @staticmethod
++    def _set_system76_foreground(game: UmuGame, pid: int) -> None:
++        backend = game.extra.get("performance_backend", "gamemode")
++        if backend not in ("system76", "both"):
++            return
++        busctl = shutil.which("busctl")
++        if not busctl or not shutil.which("system76-scheduler"):
++            print(
++                "Bottles: System76 Scheduler was selected but is unavailable; "
++                "the game will continue normally.",
++                file=sys.stderr,
++            )
++            return
++        try:
++            result = subprocess.run(
++                (
++                    busctl,
++                    "--system",
++                    "call",
++                    "com.system76.Scheduler",
++                    "/com/system76/Scheduler",
++                    "com.system76.Scheduler",
++                    "SetForegroundProcess",
++                    "u",
++                    str(pid),
++                ),
++                check=False,
++                stdout=subprocess.DEVNULL,
++                stderr=subprocess.PIPE,
++                text=True,
++                timeout=3,
++            )
++        except (OSError, subprocess.TimeoutExpired) as error:
++            print(
++                f"Bottles: could not contact System76 Scheduler: {error}",
++                file=sys.stderr,
++            )
++            return
++        if result.returncode:
++            message = result.stderr.strip() or "D-Bus request failed"
++            print(
++                f"Bottles: System76 Scheduler did not prioritize the game: {message}",
++                file=sys.stderr,
++            )
++
+     def prepare_prefix(self, game: UmuGame) -> UmuCommand:
+         return UmuCommand(
+             argv=(str(self.installation.path), ""),
+@@ -237,6 +295,7 @@ class UmuExecutor:
+             )
+             tracked = _TrackedProcess(process=process, pgid=process.pid)
+             self._processes[game.id] = tracked
++            self._set_system76_foreground(game, process.pid)
+             tracked.reader = threading.Thread(
+                 target=self._read_output,
+                 args=(game, tracked),
+diff --git a/bottles/frontend/meson.build b/bottles/frontend/meson.build
+index 6ff7c01..c26ea0b 100644
+--- a/bottles/frontend/meson.build
++++ b/bottles/frontend/meson.build
+@@ -23,12 +23,6 @@ params_file = configure_file(
+     configuration: conf
+ )
+ 
+-fs = import('fs')
+-
+-if not fs.is_file('/' + '.flatpak-info')
+-  error('file does not exist')
+-endif
+-
+ bottles_sources = [
+   '__init__.py',
+   'main.py',
+diff --git a/bottles/frontend/ui/dialog-umu-game.blp b/bottles/frontend/ui/dialog-umu-game.blp
+index 121c6ec..f3a0899 100644
+--- a/bottles/frontend/ui/dialog-umu-game.blp
++++ b/bottles/frontend/ui/dialog-umu-game.blp
+@@ -117,6 +117,22 @@ template $UmuGameDialog: Adw.Dialog {
+       Adw.PreferencesGroup {
+         title: _("Launch");
+ 
++        Adw.ComboRow combo_performance_backend {
++          title: _("Performance Backend");
++          subtitle: _("System76 Scheduler is experimental, runs system-wide, and may be unstable on some distributions.");
++          model: StringList performance_backends {};
++        }
++
++        Adw.ActionRow row_mangohud {
++          title: _("MangoHud");
++          subtitle: _("Show the performance overlay while this game is running.");
++          activatable-widget: switch_mangohud;
++
++          Switch switch_mangohud {
++            valign: center;
++          }
++        }
++
+         Adw.ActionRow row_arguments {
+           title: _("Arguments");
+           activatable: true;
+diff --git a/bottles/frontend/ui/dialog-umu-install.blp b/bottles/frontend/ui/dialog-umu-install.blp
+index be3ec73..fa76f08 100644
+--- a/bottles/frontend/ui/dialog-umu-install.blp
++++ b/bottles/frontend/ui/dialog-umu-install.blp
+@@ -61,6 +61,18 @@ template $UmuInstallDialog: Adw.Dialog {
+                 icon-name: "folder-download-symbolic";
+               }
+ 
++              Adw.ActionRow row_storage {
++                title: _("Managed Prefix Location");
++                icon-name: "drive-harddisk-symbolic";
++                activatable-widget: btn_storage;
++
++                [suffix]
++                Button btn_storage {
++                  valign: center;
++                  label: _("Change");
++                }
++              }
++
+               styles [
+                 "boxed-list",
+               ]
+diff --git a/bottles/frontend/ui/preferences.blp b/bottles/frontend/ui/preferences.blp
+index a8b39cb..81d6103 100644
+--- a/bottles/frontend/ui/preferences.blp
++++ b/bottles/frontend/ui/preferences.blp
+@@ -517,6 +517,20 @@ template $PreferencesWindow: Adw.PreferencesDialog {
+                   ]
+                 };
+               }
++
++              Adw.ComboRow combo_umu_performance {
++                title: _("Default Performance Backend");
++                subtitle: _("Used for newly added games. System76 Scheduler is an experimental system-wide service.");
++
++                model: StringList {
++                  strings [
++                    "Feral GameMode",
++                    _("System76 Scheduler (Experimental)"),
++                    _("Both (Experimental)"),
++                    _("None"),
++                  ]
++                };
++              }
+             }
+ 
+             Adw.PreferencesGroup {
+diff --git a/bottles/frontend/views/bottle_preferences.py b/bottles/frontend/views/bottle_preferences.py
+index 9abd63a..1fe93fe 100644
+--- a/bottles/frontend/views/bottle_preferences.py
++++ b/bottles/frontend/views/bottle_preferences.py
+@@ -185,9 +185,6 @@ class PreferencesView(Adw.PreferencesPage):
+                 )
+             )
+ 
+-        if not is_cpak() and not Xdp.Portal.running_under_sandbox():
+-            return
+-
+         _not_available = _("This feature is unavailable on your system.")
+         _flatpak_not_available = _("{} To add this feature, please run").format(
+             _not_available
+diff --git a/bottles/frontend/views/list.py b/bottles/frontend/views/list.py
+index 689d023..0966352 100644
+--- a/bottles/frontend/views/list.py
++++ b/bottles/frontend/views/list.py
+@@ -130,9 +130,6 @@ class BottlesBottleRow(Adw.ActionRow):
+ 
+     def run_executable(self, *_args):
+         """Display file dialog for executable"""
+-        if not is_cpak() and not Xdp.Portal.running_under_sandbox():
+-            return
+-
+         def set_path(_dialog, response):
+             if response != Gtk.ResponseType.ACCEPT:
+                 return
+diff --git a/bottles/frontend/views/new_bottle_dialog.py b/bottles/frontend/views/new_bottle_dialog.py
+index 02adeb2..d755d50 100644
+--- a/bottles/frontend/views/new_bottle_dialog.py
++++ b/bottles/frontend/views/new_bottle_dialog.py
+@@ -93,9 +93,7 @@ class BottlesNewBottleDialog(Adw.Dialog):
+         )
+         # common variables and references
+         self.window = GtkUtils.get_parent_window()
+-        if not self.window or (
+-            not is_cpak() and not Xdp.Portal.running_under_sandbox()
+-        ):
++        if not self.window:
+             return
+ 
+         self.app = self.window.get_application()
+diff --git a/bottles/frontend/views/preferences.py b/bottles/frontend/views/preferences.py
+index d1e5fa1..e5e05f8 100644
+--- a/bottles/frontend/views/preferences.py
++++ b/bottles/frontend/views/preferences.py
+@@ -106,6 +106,7 @@ class PreferencesWindow(Adw.PreferencesDialog):
+     row_umu_proton = Gtk.Template.Child()
+     label_umu_proton = Gtk.Template.Child()
+     combo_umu_dependency = Gtk.Template.Child()
++    combo_umu_performance = Gtk.Template.Child()
+     label_umu_games = Gtk.Template.Child()
+     label_umu_source = Gtk.Template.Child()
+     label_umu_version = Gtk.Template.Child()
+@@ -142,6 +143,7 @@ class PreferencesWindow(Adw.PreferencesDialog):
+         self.__updating_font_scale = False
+         self.__updating_umu_settings = False
+         self.__umu_dependency_values = ["bottles", "winetricks"]
++        self.__umu_performance_values = ["gamemode", "system76", "both", "none"]
+ 
+         self.current_bottles_path = self.data.get(UserDataKeys.CustomBottlesPath)
+         if self.current_bottles_path:
+@@ -341,6 +343,9 @@ class PreferencesWindow(Adw.PreferencesDialog):
+         self.combo_umu_dependency.connect(
+             "notify::selected", self.__on_umu_dependency_selected
+         )
++        self.combo_umu_performance.connect(
++            "notify::selected", self.__on_umu_performance_selected
++        )
+ 
+         if not self.manager.steam_manager.is_steam_supported:
+             self.switch_steam.set_sensitive(False)
+@@ -490,6 +495,14 @@ class PreferencesWindow(Adw.PreferencesDialog):
+         except ValueError:
+             dependency_index = 0
+         self.combo_umu_dependency.set_selected(dependency_index)
++        performance_backend = self.settings.get_string("umu-performance-backend")
++        try:
++            performance_index = self.__umu_performance_values.index(
++                performance_backend
++            )
++        except ValueError:
++            performance_index = 0
++        self.combo_umu_performance.set_selected(performance_index)
+         self.__updating_umu_settings = False
+         self.umu_stack.set_visible_child_name("umu_available")
+ 
+@@ -599,6 +612,15 @@ class PreferencesWindow(Adw.PreferencesDialog):
+                 "umu-dependency-tool", self.__umu_dependency_values[index]
+             )
+ 
++    def __on_umu_performance_selected(self, combo, _pspec):
++        if self.__updating_umu_settings:
++            return
++        index = combo.get_selected()
++        if index < len(self.__umu_performance_values):
++            self.settings.set_string(
++                "umu-performance-backend", self.__umu_performance_values[index]
++            )
++
+     def __choose_bottles_path(self, widget):
+         def set_path(_dialog, response):
+             if response != Gtk.ResponseType.ACCEPT:
+diff --git a/bottles/frontend/windows/umu.py b/bottles/frontend/windows/umu.py
+index adc75c5..8d95b4e 100644
+--- a/bottles/frontend/windows/umu.py
++++ b/bottles/frontend/windows/umu.py
+@@ -15,6 +15,8 @@
+ # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ 
+ import shlex
++import shutil
++import subprocess
+ from concurrent.futures import ThreadPoolExecutor
+ from gettext import gettext as _, ngettext
+ from pathlib import Path
+@@ -42,6 +44,7 @@ logging = Logger()
+ 
+ STORE_IDS = UMU_STORE_IDS
+ DEPENDENCY_TOOL_IDS = ("bottles", "winetricks")
++PERFORMANCE_BACKEND_IDS = ("gamemode", "system76", "both", "none")
+ 
+ 
+ def _store_labels():
+@@ -59,6 +62,15 @@ def _dependency_tool_labels():
+     return (_("Bottles Dependencies"), "Winetricks")
+ 
+ 
++def _performance_backend_labels():
++    return (
++        "Feral GameMode",
++        _("System76 Scheduler (Experimental)"),
++        _("Both (Experimental)"),
++        _("None"),
++    )
++
++
+ def _selected_id(combo, values):
+     position = combo.get_selected()
+     if position >= len(values):
+@@ -672,6 +684,8 @@ class UmuInstallDialog(Adw.Dialog):
+     status_error = Gtk.Template.Child()
+     row_identity = Gtk.Template.Child()
+     row_store = Gtk.Template.Child()
++    row_storage = Gtk.Template.Child()
++    btn_storage = Gtk.Template.Child()
+     row_setup_identity = Gtk.Template.Child()
+     row_setup_store = Gtk.Template.Child()
+     page_files = Gtk.Template.Child()
+@@ -718,6 +732,9 @@ class UmuInstallDialog(Adw.Dialog):
+         self._pulse_source = None
+         self._stop_requested = False
+         self._install_status = None
++        self._storage_confirmed = bool(
++            window.settings.get_string("umu-data-path")
++        )
+ 
+         self.source_modes.append(_("Run an Installer"))
+         self.source_modes.append(_("Use a Portable Executable"))
+@@ -743,6 +760,7 @@ class UmuInstallDialog(Adw.Dialog):
+             store = _store_title(self.database_entry.store)
+         self.row_identity.set_subtitle(identity)
+         self.row_store.set_subtitle(store)
++        self.row_storage.set_subtitle(str(self.repository.root))
+         self.row_setup_identity.set_subtitle(identity)
+         self.row_setup_store.set_subtitle(store)
+         self.label_proton.set_label(
+@@ -755,6 +773,7 @@ class UmuInstallDialog(Adw.Dialog):
+         self.btn_executable.connect("clicked", self.__choose_executable)
+         self.btn_done.connect("clicked", lambda *_args: self.close())
+         self.btn_retry.connect("clicked", self.__retry)
++        self.btn_storage.connect("clicked", self.__choose_storage)
+         self.row_proton.connect("activated", self.__choose_proton)
+         self.combo_source.connect("notify::selected", self.__source_changed)
+         self.entry_name.connect("changed", self.__update_navigation)
+@@ -868,7 +887,10 @@ class UmuInstallDialog(Adw.Dialog):
+     def __next(self, *_args):
+         page = self.stack.get_visible_child_name()
+         if page == "intro":
+-            self.__set_page("installer")
++            if self._storage_confirmed:
++                self.__set_page("installer")
++            else:
++                self.__confirm_storage()
+         elif page == "installer" and self.installer is not None:
+             self.__set_page("setup")
+         elif page == "setup":
+@@ -879,6 +901,56 @@ class UmuInstallDialog(Adw.Dialog):
+         elif page == "executable" and self.executable is not None:
+             self.__finish()
+ 
++    def __confirm_storage(self):
++        dialog = Adw.AlertDialog.new(
++            _("Choose the UMU Game Location"),
++            _(
++                "Bottles will keep this game's managed Proton prefix in the "
++                "current UMU folder. You can use it or choose another drive."
++            ),
++        )
++        dialog.add_response("cancel", _("Cancel"))
++        dialog.add_response("default", _("Use Current Location"))
++        dialog.add_response("choose", _("Choose Another Folder"))
++        dialog.set_default_response("choose")
++        dialog.set_close_response("cancel")
++        dialog.set_response_appearance("choose", Adw.ResponseAppearance.SUGGESTED)
++
++        def response(_dialog, response_id):
++            if response_id == "default":
++                self._storage_confirmed = True
++                self.__set_page("installer")
++            elif response_id == "choose":
++                self.__choose_storage(continue_after=True)
++
++        dialog.connect("response", response)
++        dialog.present(self)
++
++    def __choose_storage(self, *_args, continue_after=False):
++        def selected(dialog, result):
++            try:
++                folder = dialog.select_folder_finish(result)
++                path = folder.get_path()
++            except GLib.Error:
++                return
++            if path is None:
++                return
++
++            changed = self.window.manager.set_umu_data_path(path)
++            if not changed.status:
++                self.window.show_toast(changed.message)
++                return
++            self.repository = changed.data
++            self.row_storage.set_subtitle(str(self.repository.root))
++            self._storage_confirmed = True
++            self.window.update_umu_views()
++            if continue_after:
++                self.__set_page("installer")
++
++        Gtk.FileDialog(title=_("Select the Managed UMU Folder")).select_folder(
++            self.window, callback=selected
++        )
++
+     def __choose_source_file(self, *_args):
+         def selected(dialog, result):
+             try:
+@@ -938,6 +1010,9 @@ class UmuInstallDialog(Adw.Dialog):
+         extra = {
+             **game.extra,
+             "dependency_tool": dependency_tool,
++            "performance_backend": self.window.settings.get_string(
++                "umu-performance-backend"
++            ),
+             "source_mode": "portable" if self.__portable else "installer",
+         }
+         if not self.__portable:
+@@ -1368,6 +1443,9 @@ class UmuAddGameDialog(Adw.Dialog):
+         extra = {
+             **game.extra,
+             "dependency_tool": dependency_tool,
++            "performance_backend": self.window.settings.get_string(
++                "umu-performance-backend"
++            ),
+             "source_mode": "imported" if importing else "installer",
+         }
+         if not importing:
+@@ -1407,6 +1485,9 @@ class UmuGameDialog(Adw.Dialog):
+     entry_game_id = Gtk.Template.Child()
+     combo_store = Gtk.Template.Child()
+     stores = Gtk.Template.Child()
++    combo_performance_backend = Gtk.Template.Child()
++    performance_backends = Gtk.Template.Child()
++    switch_mangohud = Gtk.Template.Child()
+     row_arguments = Gtk.Template.Child()
+     row_working_directory = Gtk.Template.Child()
+     btn_working_directory = Gtk.Template.Child()
+@@ -1438,12 +1519,22 @@ class UmuGameDialog(Adw.Dialog):
+         )
+         self.arguments = tuple(game.arguments)
+         self.environment = dict(game.environment)
++        self.performance_backend = game.extra.get(
++            "performance_backend",
++            window.settings.get_string("umu-performance-backend"),
++        )
++        self.switch_mangohud.set_active(
++            self.environment.get("MANGOHUD", "").strip().lower()
++            not in ("", "0", "false", "no", "off")
++        )
+         self.installed_dependency_rows = []
+ 
+         for label in _store_labels():
+             self.stores.append(label)
+         for label in _dependency_tool_labels():
+             self.dependency_tools.append(label)
++        for label in _performance_backend_labels():
++            self.performance_backends.append(label)
+ 
+         self.entry_name.set_text(game.name)
+         self.row_executable.set_subtitle(self.executable)
+@@ -1459,6 +1550,11 @@ class UmuGameDialog(Adw.Dialog):
+         )
+         self.entry_game_id.set_text(game.game_id)
+         _select_id(self.combo_store, STORE_IDS, game.store)
++        _select_id(
++            self.combo_performance_backend,
++            PERFORMANCE_BACKEND_IDS,
++            self.performance_backend,
++        )
+         self.__update_arguments()
+         self.__update_environment()
+         self.__update_working_directory()
+@@ -1479,6 +1575,7 @@ class UmuGameDialog(Adw.Dialog):
+         self.btn_executable.connect("clicked", self.__choose_executable)
+         self.btn_prefix.connect("clicked", self.__prefix_action)
+         self.btn_proton.connect("clicked", self.__choose_proton)
++        self.switch_mangohud.connect("notify::active", self.__toggle_mangohud)
+         self.row_arguments.connect("activated", self.__choose_arguments)
+         self.row_environment.connect("activated", self.__choose_environment)
+         self.btn_working_directory.connect("clicked", self.__choose_working_directory)
+@@ -1492,6 +1589,9 @@ class UmuGameDialog(Adw.Dialog):
+         self.combo_dependency_tool.connect(
+             "notify::selected", self.__dependency_tool_changed
+         )
++        self.combo_performance_backend.connect(
++            "notify::selected", self.__performance_backend_changed
++        )
+         self.entry_winetricks.connect("changed", self.__dependency_tool_changed)
+         self.btn_remove.connect("clicked", self.__confirm_remove)
+         self.__validate_settings()
+@@ -1650,6 +1750,13 @@ class UmuGameDialog(Adw.Dialog):
+             self.__set_arguments,
+         ).present(self)
+ 
++    def __toggle_mangohud(self, *_args):
++        if self.switch_mangohud.get_active():
++            self.environment["MANGOHUD"] = "1"
++        else:
++            self.environment.pop("MANGOHUD", None)
++        self.__update_environment()
++
+     def __set_arguments(self, arguments):
+         self.arguments = tuple(arguments)
+         self.__update_arguments()
+@@ -1659,6 +1766,239 @@ class UmuGameDialog(Adw.Dialog):
+             shlex.join(self.arguments) if self.arguments else _("None")
+         )
+ 
++    def __performance_backend_changed(self, *_args):
++        backend = _selected_id(
++            self.combo_performance_backend, PERFORMANCE_BACKEND_IDS
++        )
++        packages = []
++        if backend in ("gamemode", "both") and not shutil.which("gamemoderun"):
++            packages.append("gamemode")
++        if backend in ("system76", "both") and not shutil.which(
++            "system76-scheduler"
++        ):
++            packages.append("system76-scheduler")
++        if packages:
++            dialog = Adw.AlertDialog.new(
++                _("Install Performance Backend?"),
++                _(
++                    "The selected backend needs these system packages: {0}. "
++                    "The game can still launch without them."
++                ).format(", ".join(packages)),
++            )
++            dialog.add_response("cancel", _("Not Now"))
++            dialog.add_response("install", _("Install"))
++            dialog.set_default_response("install")
++            dialog.set_close_response("cancel")
++            dialog.set_response_appearance(
++                "install", Adw.ResponseAppearance.SUGGESTED
++            )
++
++            def response(_dialog, response_id):
++                if response_id != "install":
++                    return
++                pkexec = shutil.which("pkexec")
++                pacman = shutil.which("pacman")
++                if not pkexec or not pacman:
++                    self.window.show_toast(
++                        _("Install the selected backend with your package manager.")
++                    )
++                    return
++                try:
++                    process = Gio.Subprocess.new(
++                        [
++                            pkexec,
++                            pacman,
++                            "-S",
++                            "--needed",
++                            "--noconfirm",
++                            *packages,
++                        ],
++                        Gio.SubprocessFlags.NONE,
++                    )
++                except GLib.Error as error:
++                    self.window.show_toast(str(error))
++                    return
++
++                def installed(proc, result):
++                    try:
++                        success = proc.wait_check_finish(result)
++                    except GLib.Error:
++                        success = False
++                    available = success and all(
++                        (
++                            shutil.which("gamemoderun")
++                            if package == "gamemode"
++                            else shutil.which("system76-scheduler")
++                        )
++                        for package in packages
++                    )
++                    self.window.show_toast(
++                        _("Performance backend installed.")
++                        if available
++                        else _("The performance backend was not installed.")
++                    )
++                    if available and "system76-scheduler" in packages:
++                        self.__prepare_system76_enable()
++
++                process.wait_check_async(None, installed)
++
++            dialog.connect("response", response)
++            dialog.present(self)
++            return
++
++        if backend in ("system76", "both") and shutil.which("systemctl"):
++            active = subprocess.run(
++                (
++                    "systemctl",
++                    "is-active",
++                    "--quiet",
++                    "com.system76.Scheduler.service",
++                ),
++                check=False,
++            ).returncode == 0
++            if not active:
++                self.__prepare_system76_enable()
++
++    def __prepare_system76_enable(self):
++        helper = Path(
++            "/usr/lib/bottles-native-arch/system76-pipewire-workaround"
++        )
++        monitor_enabled = helper.is_file() and subprocess.run(
++            [str(helper), "status"],
++            check=False,
++        ).returncode == 0
++        if not monitor_enabled:
++            self.__prompt_enable_system76()
++            return
++
++        dialog = Adw.AlertDialog.new(
++            _("Disable Experimental PipeWire Monitoring?"),
++            _(
++                "System76 Scheduler's optional PipeWire monitor can repeatedly "
++                "crash on some Arch-based systems. Disabling it preserves the "
++                "core scheduler and normal sound-server priority assignments."
++            ),
++        )
++        dialog.add_response("keep", _("Keep Enabled"))
++        dialog.add_response("disable", _("Disable Monitor"))
++        dialog.set_default_response("disable")
++        dialog.set_close_response("keep")
++        dialog.set_response_appearance(
++            "disable", Adw.ResponseAppearance.SUGGESTED
++        )
++
++        def response(_dialog, response_id):
++            if response_id != "disable":
++                self.__prompt_enable_system76()
++                return
++            pkexec = shutil.which("pkexec")
++            if not pkexec:
++                self.window.show_toast(
++                    _("Polkit is unavailable; the monitor was not changed.")
++                )
++                self.__prompt_enable_system76()
++                return
++
++            def disable_monitor():
++                return subprocess.run(
++                    [pkexec, str(helper), "disable"],
++                    check=False,
++                    stdout=subprocess.PIPE,
++                    stderr=subprocess.PIPE,
++                    text=True,
++                    timeout=120,
++                )
++
++            def disabled(result, error=False):
++                success = (
++                    not error
++                    and result is not None
++                    and result.returncode == 0
++                    and subprocess.run(
++                        [str(helper), "status"], check=False
++                    ).returncode != 0
++                )
++                if not success and result is not None and result.stderr:
++                    logging.warning(
++                        "System76 PipeWire workaround failed: "
++                        f"{result.stderr.strip()}"
++                    )
++                self.window.show_toast(
++                    _("System76 PipeWire monitoring was disabled.")
++                    if success
++                    else _("System76 PipeWire monitoring was not changed.")
++                )
++                self.__prompt_enable_system76()
++
++            RunAsync(disable_monitor, callback=disabled)
++
++        dialog.connect("response", response)
++        dialog.present(self)
++
++    def __prompt_enable_system76(self):
++        dialog = Adw.AlertDialog.new(
++            _("Enable System76 Scheduler?"),
++            _(
++                "System76 Scheduler is a persistent system service. Enabling it "
++                "can optimize applications outside Bottles as well."
++            ),
++        )
++        dialog.add_response("cancel", _("Not Now"))
++        dialog.add_response("enable", _("Enable and Start"))
++        dialog.set_default_response("enable")
++        dialog.set_close_response("cancel")
++        dialog.set_response_appearance("enable", Adw.ResponseAppearance.SUGGESTED)
++
++        def response(_dialog, response_id):
++            if response_id != "enable":
++                return
++            pkexec = shutil.which("pkexec")
++            systemctl = shutil.which("systemctl")
++            if not pkexec or not systemctl:
++                self.window.show_toast(
++                    _("Enable com.system76.Scheduler.service with systemctl.")
++                )
++                return
++            unit = "com.system76.Scheduler.service"
++
++            def enable_service():
++                return subprocess.run(
++                    [pkexec, systemctl, "enable", "--now", unit],
++                    check=False,
++                    stdout=subprocess.PIPE,
++                    stderr=subprocess.PIPE,
++                    text=True,
++                    timeout=120,
++                )
++
++            def enabled(result, error=False):
++                enabled_now = subprocess.run(
++                    [systemctl, "is-enabled", "--quiet", unit],
++                    check=False,
++                ).returncode == 0
++                active_now = subprocess.run(
++                    [systemctl, "is-active", "--quiet", unit],
++                    check=False,
++                ).returncode == 0
++                success = (
++                    not error and result is not None and enabled_now and active_now
++                )
++                if not success and result is not None and result.stderr:
++                    logging.warning(
++                        "System76 Scheduler activation failed: "
++                        f"{result.stderr.strip()}"
++                    )
++                self.window.show_toast(
++                    _("System76 Scheduler is running.")
++                    if success
++                    else _("System76 Scheduler was not enabled.")
++                )
++
++            RunAsync(enable_service, callback=enabled)
++
++        dialog.connect("response", response)
++        dialog.present(self)
++
+     def __choose_environment(self, *_args):
+         UmuEnvironmentDialog(
+             self.window,
+@@ -1668,6 +2008,10 @@ class UmuGameDialog(Adw.Dialog):
+ 
+     def __set_environment(self, environment):
+         self.environment = dict(environment)
++        self.switch_mangohud.set_active(
++            self.environment.get("MANGOHUD", "").strip().lower()
++            not in ("", "0", "false", "no", "off")
++        )
+         self.__update_environment()
+ 
+     def __update_environment(self):
+@@ -1715,6 +2059,9 @@ class UmuGameDialog(Adw.Dialog):
+                 "dependency_tool": _selected_id(
+                     self.combo_dependency_tool, DEPENDENCY_TOOL_IDS
+                 ),
++                "performance_backend": _selected_id(
++                    self.combo_performance_backend, PERFORMANCE_BACKEND_IDS
++                ),
+             }
+             state = self.game.state
+             installer = self.game.extra.get("installer")
+diff --git a/bottles/frontend/windows/window.py b/bottles/frontend/windows/window.py
+index b106d24..871ac38 100644
+--- a/bottles/frontend/windows/window.py
++++ b/bottles/frontend/windows/window.py
+@@ -143,35 +143,6 @@ class BottlesWindow(Adw.ApplicationWindow):
+             manager = Adw.StyleManager.get_default()
+             manager.set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+ 
+-        # Be VERY explicit that non-sandboxed environments are unsupported
+-        if not os.environ.get("CPAK_CONTAINER_ID") and not Xdp.Portal.running_under_sandbox():
+-
+-            def response(dialog, response, *args):
+-                if response == "close":
+-                    quit(1)
+-
+-            body = _(
+-                "Bottles is only supported within a sandboxed environment. Official sources of Bottles are available at"
+-            )
+-            download_url = "usebottles.com/download"
+-
+-            error_dialog = Adw.AlertDialog.new(
+-                _("Unsupported Environment"),
+-                f"{body} <a href='https://{download_url}' title='https://{download_url}'>{download_url}.</a>",
+-            )
+-
+-            error_dialog.add_response("close", _("Close"))
+-            error_dialog.set_body_use_markup(True)
+-            error_dialog.connect("response", response)
+-            error_dialog.present(self)
+-            logging.error(
+-                _(
+-                    "Bottles is only supported within a sandboxed format. Official sources of Bottles are available at:"
+-                )
+-            )
+-            logging.error("https://usebottles.com/download/")
+-            return
+-
+         # Loading view
+         self.page_loading = LoadingView()
+ 
+diff --git a/data/com.usebottles.bottles.gschema.xml b/data/com.usebottles.bottles.gschema.xml
+index 71a7939..fbb3985 100644
+--- a/data/com.usebottles.bottles.gschema.xml
++++ b/data/com.usebottles.bottles.gschema.xml
+@@ -170,6 +170,17 @@
+       <default>'bottles'</default>
+       <summary>Default UMU dependency installer</summary>
+       <description>Choose the dependency source used for new UMU games.</description>
++    </key>
++    <key type="s" name="umu-performance-backend">
++      <choices>
++        <choice value="none"/>
++        <choice value="gamemode"/>
++        <choice value="system76"/>
++        <choice value="both"/>
++      </choices>
++      <default>'gamemode'</default>
++      <summary>Default UMU performance backend</summary>
++      <description>Performance service selected for newly added UMU games.</description>
+     </key>
+ 	</schema>
+ </schemalist>
