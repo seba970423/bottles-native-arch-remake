@@ -1,8 +1,8 @@
 # Bottles Native Arch
 
 A thin native Arch/CachyOS packaging layer for the latest upstream Bottles.
-It keeps pacman in charge of every installed file, makes Feral GameMode a real
-dependency, enables Bottles outside Flatpak/cpak, and refuses known partial-UI
+It keeps pacman in charge of every installed file, keeps Feral GameMode optional,
+enables Bottles outside Flatpak/cpak, and refuses known partial-UI
 initialization regressions.
 
 ## Install or reinstall the latest release
@@ -101,6 +101,16 @@ assignments remain enabled.
 
 UMU-managed games include a per-game MangoHud switch under **Game Settings → Launch**. The switch stores `MANGOHUD=1` in the game environment, so UMU keeps control of the Proton command line. Do not put `mangohud`, `gamemoderun`, or `%command%` in the Arguments field; that field is passed directly to the Windows executable.
 
+Managed UMU games also provide a separate per-game DXVK selector. The default
+continues using the DLLs bundled with the selected Proton runner; WineD3D can
+disable DXVK, or an installed Bottles DXVK component can override only D3D8–11.
+The runner itself and VKD3D remain untouched. Before replacing any prefix DLL,
+Bottles records whether the original was a file, symlink, or absent. Switching
+back restores that exact state, and a partial installation triggers immediate
+rollback. Custom external prefixes intentionally do not allow DLL replacement.
+When WineD3D and MangoHud are both enabled, Bottles automatically uses MangoHud's
+OpenGL preload wrapper; DXVK continues using the normal Vulkan-layer environment.
+
 The patch removes only upstream's sandbox-only build/startup gates:
 
 - the `/.flatpak-info` Meson requirement;
@@ -137,7 +147,3 @@ its package.
 This package is an unofficial native build. Bottles upstream officially targets
 its sandboxed distributions, so native-only problems belong in this packaging
 project rather than upstream unless reproduced in an official build.
-
-## License
-
-MIT License
