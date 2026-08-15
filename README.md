@@ -8,8 +8,8 @@ initialization regressions.
 ## Install or reinstall the latest release
 
 ```bash
-git clone https://github.com/seba970423/bottles-native-arch.git
-cd bottles-native-arch
+git clone https://github.com/seba970423/bottles-native-arch-remake.git
+cd bottles-native-arch-remake
 ./install.sh
 ```
 
