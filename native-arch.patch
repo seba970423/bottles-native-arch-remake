@@ -48,170 +48,8 @@ index 5e1b59a..d21ccfc 100644
      def install_umu_dependencies(
          self,
          game,
-diff --git a/bottles/backend/umu/dxvk_override.py b/bottles/backend/umu/dxvk_override.py
-new file mode 100644
-index 0000000..ccde842
---- /dev/null
-+++ b/bottles/backend/umu/dxvk_override.py
-@@ -0,0 +1,156 @@
-+import json
-+import os
-+import re
-+import shutil
-+import tempfile
-+from pathlib import Path
-+from uuid import uuid4
-+
-+from bottles.backend.globals import Paths
-+from bottles.backend.umu.models import UmuGame
-+
-+
-+DXVK_DLLS = ("d3d8.dll", "d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll")
-+DXVK_OVERRIDE_KEYS = "d3d8,d3d9,d3d10core,d3d11,dxgi"
-+_SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
-+
-+
-+class UmuDxvkOverrideError(RuntimeError):
-+    pass
-+
-+
-+class UmuDxvkOverride:
-+    """Transactional, per-prefix DXVK override for managed UMU games."""
-+
-+    def __init__(self, prefix: Path):
-+        self.prefix = prefix.resolve(strict=False)
-+        self.state = self.prefix / ".bottles" / "dxvk-override"
-+        self.manifest = self.state / "manifest.json"
-+
-+    @staticmethod
-+    def _targets(prefix: Path):
-+        windows = prefix / "drive_c" / "windows"
-+        for architecture, directory in (("x64", "system32"), ("x32", "syswow64")):
-+            for dll in DXVK_DLLS:
-+                yield architecture, dll, windows / directory / dll
-+
-+    @staticmethod
-+    def _atomic_copy(source: Path, target: Path):
-+        target.parent.mkdir(parents=True, exist_ok=True)
-+        fd, temporary_name = tempfile.mkstemp(dir=target.parent)
-+        os.close(fd)
-+        temporary = Path(temporary_name)
-+        try:
-+            shutil.copyfile(source, temporary)
-+            os.replace(temporary, target)
-+        finally:
-+            temporary.unlink(missing_ok=True)
-+
-+    @staticmethod
-+    def _atomic_symlink(link_target: str, target: Path):
-+        target.parent.mkdir(parents=True, exist_ok=True)
-+        temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
-+        try:
-+            temporary.symlink_to(link_target)
-+            os.replace(temporary, target)
-+        finally:
-+            temporary.unlink(missing_ok=True)
-+
-+    def restore(self) -> bool:
-+        if not self.manifest.is_file():
-+            return False
-+        try:
-+            data = json.loads(self.manifest.read_text(encoding="utf-8"))
-+            entries = data["files"]
-+            for entry in entries:
-+                target = self.prefix / entry["target"]
-+                target.relative_to(self.prefix)
-+                kind = entry["kind"]
-+                if kind == "missing":
-+                    target.unlink(missing_ok=True)
-+                elif kind == "symlink":
-+                    self._atomic_symlink(entry["link_target"], target)
-+                elif kind == "file":
-+                    backup = self.state / entry["backup"]
-+                    backup.relative_to(self.state)
-+                    self._atomic_copy(backup, target)
-+                else:
-+                    raise UmuDxvkOverrideError("Invalid DXVK backup manifest")
-+            self.manifest.unlink(missing_ok=True)
-+            return True
-+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
-+            raise UmuDxvkOverrideError(
-+                f"Could not restore the bundled Proton DXVK: {error}"
-+            ) from error
-+
-+    def apply(self, version: str) -> None:
-+        if not _SAFE_COMPONENT.fullmatch(version):
-+            raise UmuDxvkOverrideError("Invalid DXVK component name")
-+        source_root = Path(Paths.dxvk) / version
-+        sources = []
-+        for architecture, dll, target in self._targets(self.prefix):
-+            source = source_root / architecture / dll
-+            if not source.is_file():
-+                raise UmuDxvkOverrideError(f"DXVK {version} is incomplete: {source}")
-+            sources.append((source, target))
-+
-+        self.restore()
-+        generation = uuid4().hex
-+        self.state.mkdir(parents=True, exist_ok=True)
-+        entries = []
-+        try:
-+            for _source, target in sources:
-+                relative = str(target.relative_to(self.prefix))
-+                if target.is_symlink():
-+                    entries.append(
-+                        {
-+                            "target": relative,
-+                            "kind": "symlink",
-+                            "link_target": os.readlink(target),
-+                        }
-+                    )
-+                elif target.exists():
-+                    backup_name = f"{generation}-{len(entries)}.dll"
-+                    shutil.copy2(target, self.state / backup_name)
-+                    entries.append(
-+                        {"target": relative, "kind": "file", "backup": backup_name}
-+                    )
-+                else:
-+                    entries.append({"target": relative, "kind": "missing"})
-+
-+            temporary_manifest = self.state / f"manifest-{generation}.tmp"
-+            temporary_manifest.write_text(
-+                json.dumps({"version": version, "files": entries}, indent=2),
-+                encoding="utf-8",
-+            )
-+            os.replace(temporary_manifest, self.manifest)
-+            for source, target in sources:
-+                self._atomic_copy(source, target)
-+        except Exception as error:
-+            try:
-+                self.restore()
-+            except UmuDxvkOverrideError as restore_error:
-+                raise UmuDxvkOverrideError(
-+                    f"DXVK apply failed and rollback also failed: {restore_error}"
-+                ) from error
-+            raise UmuDxvkOverrideError(f"Could not apply DXVK {version}: {error}") from error
-+
-+
-+def configure_dxvk_environment(game: UmuGame, prefix: Path, environment: dict[str, str]):
-+    selection = game.extra.get("dxvk_override", "proton")
-+    if selection == "wined3d":
-+        if game.prefix.managed:
-+            UmuDxvkOverride(prefix).restore()
-+        environment["PROTON_USE_WINED3D"] = "1"
-+        return
-+    if not game.prefix.managed:
-+        return
-+    override = UmuDxvkOverride(prefix)
-+    if selection == "proton":
-+        override.restore()
-+        return
-+    environment.pop("PROTON_USE_WINED3D", None)
-+    override.apply(selection)
-+    existing = environment.get("WINEDLLOVERRIDES", "").strip(";")
-+    native = f"{DXVK_OVERRIDE_KEYS}=n,b"
-+    environment["WINEDLLOVERRIDES"] = f"{existing};{native}" if existing else native
 diff --git a/bottles/backend/umu/executor.py b/bottles/backend/umu/executor.py
-index 55319f0..cb62d09 100644
+index 55319f0..16f7fa8 100644
 --- a/bottles/backend/umu/executor.py
 +++ b/bottles/backend/umu/executor.py
 @@ -1,5 +1,6 @@
@@ -232,7 +70,61 @@ index 55319f0..cb62d09 100644
  from bottles.backend.umu.processes import prefix_has_process
  from bottles.backend.umu.proton import UmuProtonCatalog
  from bottles.backend.umu.provider import UmuInstallation
-@@ -149,16 +154,132 @@ class UmuExecutor:
+@@ -51,6 +56,13 @@ class UmuWinetricksError(ValueError):
+ 
+ 
+ _WINETRICKS_VERB_PATTERN = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_-]*(=[a-zA-Z0-9]*)?$")
++_PROTON_SYNC_KEYS = (
++    "PROTON_USE_NTSYNC",
++    "PROTON_NO_NTSYNC",
++    "PROTON_NO_FSYNC",
++    "PROTON_NO_ESYNC",
++)
++_PROTON_SYNC_MODES = {"proton", "ntsync", "fsync", "esync", "disabled"}
+ 
+ 
+ @dataclass(frozen=True)
+@@ -109,6 +121,39 @@ class UmuExecutor:
+     def _absolute_path(path: Path) -> Path:
+         return path.expanduser().resolve(strict=False)
+ 
++    @staticmethod
++    def _configure_sync_environment(game: UmuGame, environment: dict[str, str]):
++        mode = game.extra.get("sync_backend", "proton")
++        if mode == "proton" or mode not in _PROTON_SYNC_MODES:
++            return
++
++        for key in _PROTON_SYNC_KEYS:
++            environment.pop(key, None)
++
++        if mode == "ntsync":
++            ntsync = Path("/dev/ntsync")
++            if ntsync.exists() and os.access(ntsync, os.R_OK | os.W_OK):
++                environment["PROTON_USE_NTSYNC"] = "1"
++                return
++            environment["PROTON_NO_NTSYNC"] = "1"
++            print(
++                "Bottles: NTSYNC was requested but /dev/ntsync is unavailable; "
++                "falling back to Fsync.",
++                file=sys.stderr,
++            )
++            return
++        if mode == "fsync":
++            environment["PROTON_NO_NTSYNC"] = "1"
++            return
++        if mode == "esync":
++            environment["PROTON_NO_NTSYNC"] = "1"
++            environment["PROTON_NO_FSYNC"] = "1"
++            return
++        if mode == "disabled":
++            environment["PROTON_NO_NTSYNC"] = "1"
++            environment["PROTON_NO_FSYNC"] = "1"
++            environment["PROTON_NO_ESYNC"] = "1"
++
+     def _environment(self, game: UmuGame, *, prefix_only: bool) -> dict[str, str]:
+         overridden = RESERVED_ENVIRONMENT_KEYS.intersection(game.environment)
+         if overridden:
+@@ -149,16 +194,133 @@ class UmuExecutor:
              if game.working_directory
              else None
          )
@@ -253,6 +145,7 @@ index 55319f0..cb62d09 100644
 +                    file=sys.stderr,
 +                )
 +        environment = self._environment(game, prefix_only=False)
++        self._configure_sync_environment(game, environment)
 +        dxvk_selection = game.extra.get("dxvk_override", "proton")
 +        dxvk_ready = True
 +        if game.prefix.managed and dxvk_selection not in ("proton", "wined3d"):
@@ -371,7 +264,7 @@ index 55319f0..cb62d09 100644
      def prepare_prefix(self, game: UmuGame) -> UmuCommand:
          return UmuCommand(
              argv=(str(self.installation.path), ""),
-@@ -237,6 +358,7 @@ class UmuExecutor:
+@@ -237,6 +399,7 @@ class UmuExecutor:
              )
              tracked = _TrackedProcess(process=process, pgid=process.pid)
              self._processes[game.id] = tracked
@@ -409,10 +302,10 @@ index 6ff7c01..c26ea0b 100644
    '__init__.py',
    'main.py',
 diff --git a/bottles/frontend/ui/dialog-umu-game.blp b/bottles/frontend/ui/dialog-umu-game.blp
-index 121c6ec..5f2faf4 100644
+index 121c6ec..72c3054 100644
 --- a/bottles/frontend/ui/dialog-umu-game.blp
 +++ b/bottles/frontend/ui/dialog-umu-game.blp
-@@ -117,6 +117,28 @@ template $UmuGameDialog: Adw.Dialog {
+@@ -117,6 +117,34 @@ template $UmuGameDialog: Adw.Dialog {
        Adw.PreferencesGroup {
          title: _("Launch");
  
@@ -420,6 +313,12 @@ index 121c6ec..5f2faf4 100644
 +          title: _("DXVK");
 +          subtitle: _("Override the DXVK bundled with the selected Proton for this managed prefix.");
 +          model: StringList dxvk_overrides {};
++        }
++
++        Adw.ComboRow combo_sync_backend {
++          title: _("Synchronization");
++          subtitle: _("The selected Proton runner may already enable NTSYNC automatically. Use overrides for compatibility testing.");
++          model: StringList sync_backends {};
 +        }
 +
 +        Adw.ComboRow combo_performance_backend {
@@ -594,28 +493,31 @@ index d1e5fa1..e5e05f8 100644
          def set_path(_dialog, response):
              if response != Gtk.ResponseType.ACCEPT:
 diff --git a/bottles/frontend/windows/umu.py b/bottles/frontend/windows/umu.py
-index adc75c5..67f9e53 100644
+index adc75c5..6f53eb8 100644
 --- a/bottles/frontend/windows/umu.py
 +++ b/bottles/frontend/windows/umu.py
-@@ -15,6 +15,8 @@
+@@ -14,7 +14,10 @@
+ # You should have received a copy of the GNU General Public License
  # along with this program.  If not, see <http://www.gnu.org/licenses/>.
  
++import os
  import shlex
 +import shutil
 +import subprocess
  from concurrent.futures import ThreadPoolExecutor
  from gettext import gettext as _, ngettext
  from pathlib import Path
-@@ -42,6 +44,8 @@ logging = Logger()
+@@ -42,6 +45,9 @@ logging = Logger()
  
  STORE_IDS = UMU_STORE_IDS
  DEPENDENCY_TOOL_IDS = ("bottles", "winetricks")
 +PERFORMANCE_BACKEND_IDS = ("gamemode", "system76", "both", "none")
 +DXVK_DEFAULT_IDS = ("proton", "wined3d")
++SYNC_BACKEND_IDS = ("proton", "ntsync", "fsync", "esync", "disabled")
  
  
  def _store_labels():
-@@ -59,6 +63,15 @@ def _dependency_tool_labels():
+@@ -59,6 +65,31 @@ def _dependency_tool_labels():
      return (_("Bottles Dependencies"), "Winetricks")
  
  
@@ -628,10 +530,26 @@ index adc75c5..67f9e53 100644
 +    )
 +
 +
++def _sync_backend_labels():
++    ntsync = Path("/dev/ntsync")
++    ntsync_label = (
++        _("Prefer NTSYNC (Safe fallback)")
++        if ntsync.exists() and os.access(ntsync, os.R_OK | os.W_OK)
++        else _("Prefer NTSYNC (Fsync fallback)")
++    )
++    return (
++        _("Proton Default (Recommended)"),
++        ntsync_label,
++        _("Force Fsync"),
++        _("Force Esync"),
++        _("Disable Sync Optimizations"),
++    )
++
++
  def _selected_id(combo, values):
      position = combo.get_selected()
      if position >= len(values):
-@@ -672,6 +685,8 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -672,6 +703,8 @@ class UmuInstallDialog(Adw.Dialog):
      status_error = Gtk.Template.Child()
      row_identity = Gtk.Template.Child()
      row_store = Gtk.Template.Child()
@@ -640,7 +558,7 @@ index adc75c5..67f9e53 100644
      row_setup_identity = Gtk.Template.Child()
      row_setup_store = Gtk.Template.Child()
      page_files = Gtk.Template.Child()
-@@ -718,6 +733,9 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -718,6 +751,9 @@ class UmuInstallDialog(Adw.Dialog):
          self._pulse_source = None
          self._stop_requested = False
          self._install_status = None
@@ -650,7 +568,7 @@ index adc75c5..67f9e53 100644
  
          self.source_modes.append(_("Run an Installer"))
          self.source_modes.append(_("Use a Portable Executable"))
-@@ -743,6 +761,7 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -743,6 +779,7 @@ class UmuInstallDialog(Adw.Dialog):
              store = _store_title(self.database_entry.store)
          self.row_identity.set_subtitle(identity)
          self.row_store.set_subtitle(store)
@@ -658,7 +576,7 @@ index adc75c5..67f9e53 100644
          self.row_setup_identity.set_subtitle(identity)
          self.row_setup_store.set_subtitle(store)
          self.label_proton.set_label(
-@@ -755,6 +774,7 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -755,6 +792,7 @@ class UmuInstallDialog(Adw.Dialog):
          self.btn_executable.connect("clicked", self.__choose_executable)
          self.btn_done.connect("clicked", lambda *_args: self.close())
          self.btn_retry.connect("clicked", self.__retry)
@@ -666,7 +584,7 @@ index adc75c5..67f9e53 100644
          self.row_proton.connect("activated", self.__choose_proton)
          self.combo_source.connect("notify::selected", self.__source_changed)
          self.entry_name.connect("changed", self.__update_navigation)
-@@ -868,7 +888,10 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -868,7 +906,10 @@ class UmuInstallDialog(Adw.Dialog):
      def __next(self, *_args):
          page = self.stack.get_visible_child_name()
          if page == "intro":
@@ -678,7 +596,7 @@ index adc75c5..67f9e53 100644
          elif page == "installer" and self.installer is not None:
              self.__set_page("setup")
          elif page == "setup":
-@@ -879,6 +902,56 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -879,6 +920,56 @@ class UmuInstallDialog(Adw.Dialog):
          elif page == "executable" and self.executable is not None:
              self.__finish()
  
@@ -735,7 +653,7 @@ index adc75c5..67f9e53 100644
      def __choose_source_file(self, *_args):
          def selected(dialog, result):
              try:
-@@ -938,6 +1011,9 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -938,6 +1029,9 @@ class UmuInstallDialog(Adw.Dialog):
          extra = {
              **game.extra,
              "dependency_tool": dependency_tool,
@@ -745,7 +663,7 @@ index adc75c5..67f9e53 100644
              "source_mode": "portable" if self.__portable else "installer",
          }
          if not self.__portable:
-@@ -1368,6 +1444,9 @@ class UmuAddGameDialog(Adw.Dialog):
+@@ -1368,6 +1462,9 @@ class UmuAddGameDialog(Adw.Dialog):
          extra = {
              **game.extra,
              "dependency_tool": dependency_tool,
@@ -755,7 +673,7 @@ index adc75c5..67f9e53 100644
              "source_mode": "imported" if importing else "installer",
          }
          if not importing:
-@@ -1407,6 +1486,11 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1407,6 +1504,13 @@ class UmuGameDialog(Adw.Dialog):
      entry_game_id = Gtk.Template.Child()
      combo_store = Gtk.Template.Child()
      stores = Gtk.Template.Child()
@@ -763,11 +681,13 @@ index adc75c5..67f9e53 100644
 +    performance_backends = Gtk.Template.Child()
 +    combo_dxvk_override = Gtk.Template.Child()
 +    dxvk_overrides = Gtk.Template.Child()
++    combo_sync_backend = Gtk.Template.Child()
++    sync_backends = Gtk.Template.Child()
 +    switch_mangohud = Gtk.Template.Child()
      row_arguments = Gtk.Template.Child()
      row_working_directory = Gtk.Template.Child()
      btn_working_directory = Gtk.Template.Child()
-@@ -1438,12 +1522,28 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1438,12 +1542,30 @@ class UmuGameDialog(Adw.Dialog):
          )
          self.arguments = tuple(game.arguments)
          self.environment = dict(game.environment)
@@ -789,6 +709,8 @@ index adc75c5..67f9e53 100644
              self.dependency_tools.append(label)
 +        for label in _performance_backend_labels():
 +            self.performance_backends.append(label)
++        for label in _sync_backend_labels():
++            self.sync_backends.append(label)
 +        self.dxvk_overrides.append(_("Bundled with selected Proton (Recommended)"))
 +        self.dxvk_overrides.append(_("WineD3D (Disable DXVK)"))
 +        for version in window.manager.dxvk_available:
@@ -796,7 +718,7 @@ index adc75c5..67f9e53 100644
  
          self.entry_name.set_text(game.name)
          self.row_executable.set_subtitle(self.executable)
-@@ -1459,6 +1559,17 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1459,6 +1581,22 @@ class UmuGameDialog(Adw.Dialog):
          )
          self.entry_game_id.set_text(game.game_id)
          _select_id(self.combo_store, STORE_IDS, game.store)
@@ -811,10 +733,15 @@ index adc75c5..67f9e53 100644
 +            game.extra.get("dxvk_override", "proton"),
 +        )
 +        self.combo_dxvk_override.set_sensitive(self.prefix_managed)
++        _select_id(
++            self.combo_sync_backend,
++            SYNC_BACKEND_IDS,
++            game.extra.get("sync_backend", "proton"),
++        )
          self.__update_arguments()
          self.__update_environment()
          self.__update_working_directory()
-@@ -1479,6 +1590,7 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1479,6 +1617,7 @@ class UmuGameDialog(Adw.Dialog):
          self.btn_executable.connect("clicked", self.__choose_executable)
          self.btn_prefix.connect("clicked", self.__prefix_action)
          self.btn_proton.connect("clicked", self.__choose_proton)
@@ -822,7 +749,7 @@ index adc75c5..67f9e53 100644
          self.row_arguments.connect("activated", self.__choose_arguments)
          self.row_environment.connect("activated", self.__choose_environment)
          self.btn_working_directory.connect("clicked", self.__choose_working_directory)
-@@ -1492,6 +1604,9 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1492,6 +1631,9 @@ class UmuGameDialog(Adw.Dialog):
          self.combo_dependency_tool.connect(
              "notify::selected", self.__dependency_tool_changed
          )
@@ -832,7 +759,7 @@ index adc75c5..67f9e53 100644
          self.entry_winetricks.connect("changed", self.__dependency_tool_changed)
          self.btn_remove.connect("clicked", self.__confirm_remove)
          self.__validate_settings()
-@@ -1650,6 +1765,13 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1650,6 +1792,13 @@ class UmuGameDialog(Adw.Dialog):
              self.__set_arguments,
          ).present(self)
  
@@ -846,7 +773,7 @@ index adc75c5..67f9e53 100644
      def __set_arguments(self, arguments):
          self.arguments = tuple(arguments)
          self.__update_arguments()
-@@ -1659,6 +1781,239 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1659,6 +1808,239 @@ class UmuGameDialog(Adw.Dialog):
              shlex.join(self.arguments) if self.arguments else _("None")
          )
  
@@ -1086,7 +1013,7 @@ index adc75c5..67f9e53 100644
      def __choose_environment(self, *_args):
          UmuEnvironmentDialog(
              self.window,
-@@ -1668,6 +2023,10 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1668,6 +2050,10 @@ class UmuGameDialog(Adw.Dialog):
  
      def __set_environment(self, environment):
          self.environment = dict(environment)
@@ -1097,7 +1024,7 @@ index adc75c5..67f9e53 100644
          self.__update_environment()
  
      def __update_environment(self):
-@@ -1715,6 +2074,12 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1715,6 +2101,15 @@ class UmuGameDialog(Adw.Dialog):
                  "dependency_tool": _selected_id(
                      self.combo_dependency_tool, DEPENDENCY_TOOL_IDS
                  ),
@@ -1106,6 +1033,9 @@ index adc75c5..67f9e53 100644
 +                ),
 +                "dxvk_override": _selected_id(
 +                    self.combo_dxvk_override, self.dxvk_override_ids
++                ),
++                "sync_backend": _selected_id(
++                    self.combo_sync_backend, SYNC_BACKEND_IDS
 +                ),
              }
              state = self.game.state
@@ -1172,3 +1102,165 @@ index 71a7939..fbb3985 100644
      </key>
  	</schema>
  </schemalist>
+diff --git a/bottles/backend/umu/dxvk_override.py b/bottles/backend/umu/dxvk_override.py
+new file mode 100644
+index 0000000..ccde842
+--- /dev/null
++++ b/bottles/backend/umu/dxvk_override.py
+@@ -0,0 +1,156 @@
++import json
++import os
++import re
++import shutil
++import tempfile
++from pathlib import Path
++from uuid import uuid4
++
++from bottles.backend.globals import Paths
++from bottles.backend.umu.models import UmuGame
++
++
++DXVK_DLLS = ("d3d8.dll", "d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll")
++DXVK_OVERRIDE_KEYS = "d3d8,d3d9,d3d10core,d3d11,dxgi"
++_SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
++
++
++class UmuDxvkOverrideError(RuntimeError):
++    pass
++
++
++class UmuDxvkOverride:
++    """Transactional, per-prefix DXVK override for managed UMU games."""
++
++    def __init__(self, prefix: Path):
++        self.prefix = prefix.resolve(strict=False)
++        self.state = self.prefix / ".bottles" / "dxvk-override"
++        self.manifest = self.state / "manifest.json"
++
++    @staticmethod
++    def _targets(prefix: Path):
++        windows = prefix / "drive_c" / "windows"
++        for architecture, directory in (("x64", "system32"), ("x32", "syswow64")):
++            for dll in DXVK_DLLS:
++                yield architecture, dll, windows / directory / dll
++
++    @staticmethod
++    def _atomic_copy(source: Path, target: Path):
++        target.parent.mkdir(parents=True, exist_ok=True)
++        fd, temporary_name = tempfile.mkstemp(dir=target.parent)
++        os.close(fd)
++        temporary = Path(temporary_name)
++        try:
++            shutil.copyfile(source, temporary)
++            os.replace(temporary, target)
++        finally:
++            temporary.unlink(missing_ok=True)
++
++    @staticmethod
++    def _atomic_symlink(link_target: str, target: Path):
++        target.parent.mkdir(parents=True, exist_ok=True)
++        temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
++        try:
++            temporary.symlink_to(link_target)
++            os.replace(temporary, target)
++        finally:
++            temporary.unlink(missing_ok=True)
++
++    def restore(self) -> bool:
++        if not self.manifest.is_file():
++            return False
++        try:
++            data = json.loads(self.manifest.read_text(encoding="utf-8"))
++            entries = data["files"]
++            for entry in entries:
++                target = self.prefix / entry["target"]
++                target.relative_to(self.prefix)
++                kind = entry["kind"]
++                if kind == "missing":
++                    target.unlink(missing_ok=True)
++                elif kind == "symlink":
++                    self._atomic_symlink(entry["link_target"], target)
++                elif kind == "file":
++                    backup = self.state / entry["backup"]
++                    backup.relative_to(self.state)
++                    self._atomic_copy(backup, target)
++                else:
++                    raise UmuDxvkOverrideError("Invalid DXVK backup manifest")
++            self.manifest.unlink(missing_ok=True)
++            return True
++        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
++            raise UmuDxvkOverrideError(
++                f"Could not restore the bundled Proton DXVK: {error}"
++            ) from error
++
++    def apply(self, version: str) -> None:
++        if not _SAFE_COMPONENT.fullmatch(version):
++            raise UmuDxvkOverrideError("Invalid DXVK component name")
++        source_root = Path(Paths.dxvk) / version
++        sources = []
++        for architecture, dll, target in self._targets(self.prefix):
++            source = source_root / architecture / dll
++            if not source.is_file():
++                raise UmuDxvkOverrideError(f"DXVK {version} is incomplete: {source}")
++            sources.append((source, target))
++
++        self.restore()
++        generation = uuid4().hex
++        self.state.mkdir(parents=True, exist_ok=True)
++        entries = []
++        try:
++            for _source, target in sources:
++                relative = str(target.relative_to(self.prefix))
++                if target.is_symlink():
++                    entries.append(
++                        {
++                            "target": relative,
++                            "kind": "symlink",
++                            "link_target": os.readlink(target),
++                        }
++                    )
++                elif target.exists():
++                    backup_name = f"{generation}-{len(entries)}.dll"
++                    shutil.copy2(target, self.state / backup_name)
++                    entries.append(
++                        {"target": relative, "kind": "file", "backup": backup_name}
++                    )
++                else:
++                    entries.append({"target": relative, "kind": "missing"})
++
++            temporary_manifest = self.state / f"manifest-{generation}.tmp"
++            temporary_manifest.write_text(
++                json.dumps({"version": version, "files": entries}, indent=2),
++                encoding="utf-8",
++            )
++            os.replace(temporary_manifest, self.manifest)
++            for source, target in sources:
++                self._atomic_copy(source, target)
++        except Exception as error:
++            try:
++                self.restore()
++            except UmuDxvkOverrideError as restore_error:
++                raise UmuDxvkOverrideError(
++                    f"DXVK apply failed and rollback also failed: {restore_error}"
++                ) from error
++            raise UmuDxvkOverrideError(f"Could not apply DXVK {version}: {error}") from error
++
++
++def configure_dxvk_environment(game: UmuGame, prefix: Path, environment: dict[str, str]):
++    selection = game.extra.get("dxvk_override", "proton")
++    if selection == "wined3d":
++        if game.prefix.managed:
++            UmuDxvkOverride(prefix).restore()
++        environment["PROTON_USE_WINED3D"] = "1"
++        return
++    if not game.prefix.managed:
++        return
++    override = UmuDxvkOverride(prefix)
++    if selection == "proton":
++        override.restore()
++        return
++    environment.pop("PROTON_USE_WINED3D", None)
++    override.apply(selection)
++    existing = environment.get("WINEDLLOVERRIDES", "").strip(";")
++    native = f"{DXVK_OVERRIDE_KEYS}=n,b"
++    environment["WINEDLLOVERRIDES"] = f"{existing};{native}" if existing else native

@@ -156,6 +156,28 @@ When MangoHud is enabled with WineD3D, Bottles automatically uses MangoHud's
 OpenGL preload wrapper. This allows the overlay to appear in the game without
 necessarily appearing in launchers or other blacklisted helper processes.
 
+### Per-game synchronization override
+
+UMU games also expose a synchronization selector under **Game Settings →
+Launch**. **Proton Default** is recommended and leaves the runner's environment
+untouched; recent runners such as DWProton may already select NTSYNC
+automatically when the host supports it.
+
+The override modes are intended for compatibility testing:
+
+- **Prefer NTSYNC** — explicitly requests NTSYNC when `/dev/ntsync` exists and
+  is accessible, otherwise falls back safely to Fsync.
+- **Force Fsync** — disables NTSYNC while retaining Proton's Fsync path.
+- **Force Esync** — disables NTSYNC and Fsync.
+- **Disable Sync Optimizations** — disables NTSYNC, Fsync, and Esync for
+  troubleshooting.
+
+Forced modes remove conflicting Proton synchronization variables before
+applying their own settings. Existing games remain on **Proton Default**, and
+unsupported NTSYNC never prevents a game from launching. To verify actual
+NTSYNC use while a game is running, use `lsof /dev/ntsync`; overlay indicators
+alone may be inaccurate.
+
 #### Tested example
 
 Goddess of Victory: NIKKE was tested with DWProton and WineD3D on an AMD

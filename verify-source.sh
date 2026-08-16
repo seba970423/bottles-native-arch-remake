@@ -21,9 +21,12 @@ for feature in \
   "${umu_dialog}:Choose the UMU Game Location" \
   "${umu_blueprint}:Managed Prefix Location" \
   "${umu_game_blueprint}:combo_dxvk_override" \
+  "${umu_game_blueprint}:combo_sync_backend" \
+  "${umu_dialog}:SYNC_BACKEND_IDS" \
   "${umu_dxvk}:class UmuDxvkOverride" \
   "${umu_dxvk}:def restore" \
   "${umu_meson}:'dxvk_override.py'" \
+  "${umu_executor}:def _configure_sync_environment" \
   "${umu_executor}:argv = (mangohud, \"--dlsym\", *argv)"; do
   feature_file=${feature%%:*}
   feature_text=${feature#*:}
