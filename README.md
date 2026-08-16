@@ -128,41 +128,6 @@ Bottle data can remain in the default location or be placed on secondary
 storage. This package does not replace those paths with symlinks or bypass
 pacman's ownership database.
 
-### Per-game DXVK and WineD3D selection
-
-Managed UMU games expose a separate graphics-translation selector under
-**Game Settings → Launch**. This setting is independent of the selected Proton
-runner.
-
-Available modes:
-
-- **Bundled with selected Proton** — uses the DXVK version supplied by Proton
-  and remains the recommended default.
-- **Installed DXVK version** — replaces only the managed prefix's D3D8–11 DLLs
-  while keeping the selected Proton runner and VKD3D.
-- **WineD3D** — disables DXVK for D3D8–11 and uses Wine's OpenGL translation
-  layer instead. VKD3D remains available for Direct3D 12.
-
-WineD3D may provide better compatibility, input latency, or frame pacing in
-some games, but it may perform worse in others. Results depend on the game,
-graphics driver, and hardware.
-
-Before applying a custom DXVK version, Bottles records the original DLL state,
-including regular files, symbolic links, and missing files. Switching back to
-the bundled Proton option restores that state. A failed or incomplete
-replacement triggers automatic rollback.
-
-When MangoHud is enabled with WineD3D, Bottles automatically uses MangoHud's
-OpenGL preload wrapper. This allows the overlay to appear in the game without
-necessarily appearing in launchers or other blacklisted helper processes.
-
-#### Tested example
-
-Goddess of Victory: NIKKE was tested with DWProton and WineD3D on an AMD
-RX 6600 and Intel UHD 620. On both systems, WineD3D eliminated observable
-cursor lag and produced smooth 60 FPS frame delivery. Results with other games
-and hardware may differ.
-
 ## Remove
 
 Run the interactive uninstaller without `sudo`:
