@@ -530,7 +530,7 @@ index 2c97fa3..a611de6 100644
                  "boxed-list",
                ]
 diff --git a/bottles/frontend/ui/library-entry.blp b/bottles/frontend/ui/library-entry.blp
-index fd16ed0..2037131 100644
+index fd16ed0..9f3b4d1 100644
 --- a/bottles/frontend/ui/library-entry.blp
 +++ b/bottles/frontend/ui/library-entry.blp
 @@ -80,9 +80,23 @@ template $LibraryEntry: Box {
@@ -583,142 +583,10 @@ index fd16ed0..2037131 100644
  
        styles [
          "flat",
-@@ -107,106 +135,113 @@ template $LibraryEntry: Box {
-     Revealer revealer_details {
-       reveal-child: false;
-       transition-type: crossfade;
--      valign: end;
--
--      Box {
--        spacing: 6;
--        halign: fill;
--        valign: end;
--        vexpand: true;
--        margin-bottom: 10;
--        margin-start: 10;
--        margin-end: 10;
--
--        styles [
--          "osd",
--          "toolbar",
--          "library-entry-details",
--        ]
-+      hexpand: true;
-+      vexpand: true;
+@@ -154,18 +182,6 @@ template $LibraryEntry: Box {
  
-+      Overlay {
+         [end]
          Box {
--          orientation: vertical;
--          hexpand: true;
--          valign: center;
--
--          Label label_name {
--            halign: start;
--            label: _("Item name");
--            max-width-chars: 20;
--            ellipsize: middle;
--
--            styles [
--              "title",
--            ]
-+          spacing: 6;
-+          halign: fill;
-+          valign: end;
-+          margin-bottom: 10;
-+          margin-start: 10;
-+          margin-end: 10;
-+
-+          styles [
-+            "osd",
-+            "toolbar",
-+            "library-entry-details",
-+          ]
-+
-+          Box {
-+            orientation: vertical;
-+            hexpand: true;
-+            valign: center;
-+
-+            Label label_name {
-+              halign: start;
-+              label: _("Item name");
-+              max-width-chars: 20;
-+              ellipsize: middle;
-+
-+              styles [
-+                "title",
-+              ]
-+            }
-+
-+            Label label_bottle {
-+              halign: start;
-+              label: _("Bottle name");
-+              max-width-chars: 20;
-+              ellipsize: middle;
-+
-+              styles [
-+                "caption",
-+              ]
-+            }
-           }
- 
--          Label label_bottle {
--            halign: start;
--            label: _("Bottle name");
--            max-width-chars: 20;
--            ellipsize: middle;
--
--            styles [
--              "caption",
--            ]
-+          [end]
-+          Box {
-+            Button btn_settings {
-+              visible: false;
-+              halign: center;
-+              icon-name: "preferences-system-symbolic";
-+              tooltip-text: _("Game Settings");
-+
-+              styles [
-+                "flat"
-+              ]
-+            }
-+
-+            Button btn_cover {
-+              halign: center;
-+              icon-name: "insert-image-symbolic";
-+              tooltip-text: _("Change Cover");
-+
-+              styles [
-+                "flat"
-+              ]
-+            }
-+
-+            Button btn_remove {
-+              halign: center;
-+              icon-name: "user-trash-symbolic";
-+              tooltip-text: _("Remove from Library");
-+
-+              styles [
-+                "flat"
-+              ]
-+            }
-+
-+            Button btn_stop {
-+              visible: false;
-+              halign: center;
-+              icon-name: "media-playback-stop-symbolic";
-+              tooltip-text: _("Stop");
-+
-+              styles [
-+                "flat"
-+              ]
-+            }
-           }
-         }
- 
--        [end]
--        Box {
 -          MenuButton btn_umu_actions {
 -            visible: false;
 -            halign: center;
@@ -731,65 +599,38 @@ index fd16ed0..2037131 100644
 -            ]
 -          }
 -
--          Button btn_settings {
--            visible: false;
--            halign: center;
--            icon-name: "preferences-system-symbolic";
--            tooltip-text: _("Game Settings");
--
--            styles [
--              "flat"
--            ]
--          }
--
--          Button btn_cover {
--            halign: center;
--            icon-name: "insert-image-symbolic";
--            tooltip-text: _("Change Cover");
--
--            styles [
--              "flat"
--            ]
--          }
--
--          Button btn_remove {
--            halign: center;
--            icon-name: "user-trash-symbolic";
--            tooltip-text: _("Remove from Library");
--
--            styles [
--              "flat"
--            ]
--          }
--
--          Button btn_stop {
--            visible: false;
--            halign: center;
--            icon-name: "media-playback-stop-symbolic";
--            tooltip-text: _("Stop");
--
--            styles [
--              "flat"
--            ]
--          }
-+        [overlay]
-+        MenuButton btn_umu_actions {
-+          visible: false;
-+          halign: end;
-+          valign: start;
-+          margin-top: 10;
-+          margin-end: 10;
-+          icon-name: "view-more-symbolic";
-+          tooltip-text: _("More Actions");
-+          popover: pop_umu_actions;
-+
-+          styles [
-+            "osd",
-+            "circular",
-+          ]
+           Button btn_settings {
+             visible: false;
+             halign: center;
+@@ -210,6 +226,28 @@ template $LibraryEntry: Box {
          }
        }
      }
++
++    [overlay]
++    Revealer revealer_umu_actions {
++      reveal-child: false;
++      transition-type: crossfade;
++      halign: end;
++      valign: start;
++      margin-top: 10;
++      margin-end: 10;
++
++      MenuButton btn_umu_actions {
++        visible: false;
++        icon-name: "view-more-symbolic";
++        tooltip-text: _("More Actions");
++        popover: pop_umu_actions;
++
++        styles [
++          "osd",
++          "circular",
++        ]
++      }
++    }
+   }
+ 
+   styles [
 diff --git a/bottles/frontend/ui/preferences.blp b/bottles/frontend/ui/preferences.blp
 index a8b39cb..81d6103 100644
 --- a/bottles/frontend/ui/preferences.blp
@@ -984,6 +825,31 @@ index 6b91d32..44d802e 100644
      def __choose_bottles_path(self, widget):
          def set_path(_dialog, response):
              if response != Gtk.ResponseType.ACCEPT:
+diff --git a/bottles/frontend/widgets/library.py b/bottles/frontend/widgets/library.py
+index bc14a8e..40db59a 100644
+--- a/bottles/frontend/widgets/library.py
++++ b/bottles/frontend/widgets/library.py
+@@ -76,6 +76,7 @@ class LibraryEntry(Gtk.Box):
+     label_source = Gtk.Template.Child()
+     img_cover = Gtk.Template.Child()
+     revealer_details = Gtk.Template.Child()
++    revealer_umu_actions = Gtk.Template.Child()
+     overlay = Gtk.Template.Child()
+ 
+     # endregion
+@@ -507,9 +508,9 @@ class LibraryEntry(Gtk.Box):
+         self.__sync_details_revealer()
+ 
+     def __sync_details_revealer(self):
+-        self.revealer_details.set_reveal_child(
+-            self.__pointer_inside or self.__umu_actions_popover.get_visible()
+-        )
++        reveal = self.__pointer_inside or self.__umu_actions_popover.get_visible()
++        self.revealer_details.set_reveal_child(reveal)
++        self.revealer_umu_actions.set_reveal_child(reveal)
+ 
+     # hide() and show() are essentialy workarounds to avoid keeping
+     # the empty space of the hidden entry in the GtkFlowBox
 diff --git a/bottles/frontend/windows/umu.py b/bottles/frontend/windows/umu.py
 index 4ec2f72..9d7a41d 100644
 --- a/bottles/frontend/windows/umu.py

@@ -11,6 +11,7 @@ umu_dxvk="${source_root}/bottles/backend/umu/dxvk_override.py"
 umu_meson="${source_root}/bottles/backend/umu/meson.build"
 umu_executor="${source_root}/bottles/backend/umu/executor.py"
 library_blueprint="${source_root}/bottles/frontend/ui/library-entry.blp"
+library_widget="${source_root}/bottles/frontend/widgets/library.py"
 library_view="${source_root}/bottles/frontend/views/library.py"
 library_style="${source_root}/bottles/frontend/ui/style.css"
 
@@ -61,19 +62,36 @@ fi
 
 # Bottles 67.4 adds a third UMU action.  It must not live in the bottom
 # title/action row, where it steals width and causes GTK to ellipsize the
-# already-shortened title a second time.  Keep it as a hover-revealed overlay
-# at the top-right of the cover instead.
+# already-shortened title a second time.  It also must not be placed inside a
+# full-card details overlay, because that intercepts hover/clicks and prevents
+# the Launch pill from appearing.  Keep it in its own small top-right revealer.
 if grep -Fq '"library-entry-actions"' "${library_blueprint}" ||
    grep -Fq '.library-entry-actions >' "${library_style}"; then
   printf '%s\n' 'Source verification failed: the cramped library-card toolbar regression is present.' >&2
   exit 1
 fi
 
-if ! grep -Fq 'MenuButton btn_umu_actions {' "${library_blueprint}" ||
-   ! sed -n '/MenuButton btn_umu_actions {/,/^[[:space:]]*}/p' "${library_blueprint}" | grep -Fq 'halign: end;' ||
-   ! sed -n '/MenuButton btn_umu_actions {/,/^[[:space:]]*}/p' "${library_blueprint}" | grep -Fq 'valign: start;' ||
+if sed -n '/Revealer revealer_details {/,/Revealer revealer_umu_actions {/p' "${library_blueprint}" | grep -Fq 'Overlay {'; then
+  printf '%s\n' 'Source verification failed: the full-card details overlay blocks the Launch button.' >&2
+  exit 1
+fi
+
+if ! sed -n '/Revealer revealer_details {/,/^[[:space:]]*}/p' "${library_blueprint}" | grep -Fq 'valign: end;'; then
+  printf '%s\n' 'Source verification failed: the details revealer no longer stays at the card bottom.' >&2
+  exit 1
+fi
+
+if ! grep -Fq 'Revealer revealer_umu_actions {' "${library_blueprint}" ||
+   ! sed -n '/Revealer revealer_umu_actions {/,/MenuButton btn_umu_actions {/p' "${library_blueprint}" | grep -Fq 'halign: end;' ||
+   ! sed -n '/Revealer revealer_umu_actions {/,/MenuButton btn_umu_actions {/p' "${library_blueprint}" | grep -Fq 'valign: start;' ||
    ! sed -n '/MenuButton btn_umu_actions {/,/^[[:space:]]*}/p' "${library_blueprint}" | grep -Fq '"circular"'; then
   printf '%s\n' 'Source verification failed: the non-intrusive UMU More Actions overlay is missing.' >&2
+  exit 1
+fi
+
+if ! grep -Fq 'revealer_umu_actions = Gtk.Template.Child()' "${library_widget}" ||
+   ! grep -Fq 'self.revealer_umu_actions.set_reveal_child(reveal)' "${library_widget}"; then
+  printf '%s\n' 'Source verification failed: the UMU More Actions revealer is not synced with card hover state.' >&2
   exit 1
 fi
 
