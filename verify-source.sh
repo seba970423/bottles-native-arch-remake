@@ -59,6 +59,24 @@ if grep -Fq '.library-entry-launch-label {' "${library_style}"; then
   exit 1
 fi
 
+# Bottles 67.4 adds a third UMU action.  It must not live in the bottom
+# title/action row, where it steals width and causes GTK to ellipsize the
+# already-shortened title a second time.  Keep it as a hover-revealed overlay
+# at the top-right of the cover instead.
+if grep -Fq '"library-entry-actions"' "${library_blueprint}" ||
+   grep -Fq '.library-entry-actions >' "${library_style}"; then
+  printf '%s\n' 'Source verification failed: the cramped library-card toolbar regression is present.' >&2
+  exit 1
+fi
+
+if ! grep -Fq 'MenuButton btn_umu_actions {' "${library_blueprint}" ||
+   ! sed -n '/MenuButton btn_umu_actions {/,/^[[:space:]]*}/p' "${library_blueprint}" | grep -Fq 'halign: end;' ||
+   ! sed -n '/MenuButton btn_umu_actions {/,/^[[:space:]]*}/p' "${library_blueprint}" | grep -Fq 'valign: start;' ||
+   ! sed -n '/MenuButton btn_umu_actions {/,/^[[:space:]]*}/p' "${library_blueprint}" | grep -Fq '"circular"'; then
+  printf '%s\n' 'Source verification failed: the non-intrusive UMU More Actions overlay is missing.' >&2
+  exit 1
+fi
+
 if grep -Eq '^[[:space:]]*if not gamemode_available:[[:space:]]*$' "${preferences}" &&
    sed -n '/if not gamemode_available:/,+2p' "${preferences}" | grep -Eq '^[[:space:]]*return[[:space:]]*$'; then
   printf '%s\n' 'Source verification failed: the GameMode early-return regression is present.' >&2
