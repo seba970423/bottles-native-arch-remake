@@ -71,7 +71,7 @@ available, before its combo-box signals were connected. Opening a bottle later
 called `handler_block_by_func()` for a handler that never existed and raised
 `TypeError: nothing connected`.
 
-Upstream Bottles 66.6 has fixed that exact GameMode early return. This package
+Current upstream Bottles has fixed that exact GameMode early return. This package
 therefore keeps GameMode optional, and `verify-source.sh` guards against the
 initialization bug returning. The installer recommends Feral GameMode and also
 offers System76 Scheduler while clearly identifying it as an experimental,

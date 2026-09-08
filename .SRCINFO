@@ -1,7 +1,7 @@
 pkgbase = bottles-native-arch
 	pkgdesc = Latest upstream Bottles, packaged natively for Arch Linux
-	pkgver = 66.6
-	pkgrel = 13
+	pkgver = 67.4
+	pkgrel = 7
 	epoch = 2
 	url = https://github.com/bottlesdevs/Bottles
 	arch = any
@@ -50,15 +50,15 @@ pkgbase = bottles-native-arch
 	optdepends = vulkan-tools: vkcube test and Vulkan information
 	optdepends = xorg-xdpyinfo: display information detection
 	optdepends = xterm: fallback terminal for Run executable in terminal
-	provides = bottles=66.6
+	provides = bottles=67.4
 	conflicts = bottles
-	source = Bottles-66.6.tar.gz::https://github.com/bottlesdevs/Bottles/archive/refs/tags/66.6.tar.gz
+	source = Bottles-67.4.tar.gz::https://github.com/bottlesdevs/Bottles/archive/refs/tags/67.4.tar.gz
 	source = native-arch.patch
 	source = verify-source.sh
 	source = system76-pipewire-workaround.sh
-	sha256sums = f6f9ed5c414307bf55ce534f2e3c25fc36625b323b4b7887e08c0182a12861ce
-	sha256sums = bfa3e1cad94b791a8ba9facd7ba08b198368e6c3384a0c94f13e895f4d8cb744
-	sha256sums = 231aa8c036517984f4d67832b961e700bc35516ddc1baecdfbf34c877176119b
+	sha256sums = eb417e37851921565664c9dbe2713f94e643f0963d3c6c89afc4cf2bcd7aff3c
+	sha256sums = 041352dea9b3bf8142d8e3ad8579350b49813e3ec46ccd7beb87ef142aca8186
+	sha256sums = dc9989a38b3032b7a37f4a15efd038245c50f0bb29a97faf8eaf5d0a25560190
 	sha256sums = df33a555ec11517841667948c8f2702719bd5d3887ee012efd73703661235d2a
 
 pkgname = bottles-native-arch

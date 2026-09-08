@@ -33,6 +33,10 @@ if [[ ! -r /etc/arch-release ]] || ! command -v makepkg >/dev/null 2>&1; then
   exit 1
 fi
 
+if ${update}; then
+  "${repo_root}/update.sh"
+fi
+
 expected_version=$(bash -c '
   source "$1"
   if [[ -n ${epoch:-} ]]; then
@@ -43,14 +47,10 @@ expected_version=$(bash -c '
 ' _ "${repo_root}/PKGBUILD")
 printf 'Preparing Bottles Native package %s\n' "${expected_version}"
 
-if ${update}; then
-  "${repo_root}/update.sh"
-fi
-
 "${repo_root}/test.sh"
 "${repo_root}/install-dependencies.sh"
 cd "${repo_root}"
-makepkg --clean --force
+makepkg --cleanbuild --clean --force
 
 mapfile -t package_files < <(makepkg --packagelist)
 if (( ${#package_files[@]} != 1 )) || [[ ! -f ${package_files[0]} ]]; then

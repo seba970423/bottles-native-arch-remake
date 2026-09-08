@@ -16,6 +16,10 @@ fi
 if command -v makepkg >/dev/null 2>&1; then
   cd "${repo_root}"
   makepkg --verifysource
+  # --nobuild downloads/extracts sources and runs prepare(), which is where
+  # native-arch.patch and verify-source.sh are exercised. --nodeps keeps this
+  # preflight independent from runtime/build dependency installation.
+  makepkg --nobuild --nodeps --cleanbuild
   makepkg --printsrcinfo > .SRCINFO
 else
   printf '%s\n' 'makepkg not found; skipped PKGBUILD source verification and .SRCINFO generation.'

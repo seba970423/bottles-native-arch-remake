@@ -10,6 +10,9 @@ umu_game_blueprint="${source_root}/bottles/frontend/ui/dialog-umu-game.blp"
 umu_dxvk="${source_root}/bottles/backend/umu/dxvk_override.py"
 umu_meson="${source_root}/bottles/backend/umu/meson.build"
 umu_executor="${source_root}/bottles/backend/umu/executor.py"
+library_blueprint="${source_root}/bottles/frontend/ui/library-entry.blp"
+library_view="${source_root}/bottles/frontend/views/library.py"
+library_style="${source_root}/bottles/frontend/ui/style.css"
 
 if [[ ! -f ${preferences} ]]; then
   printf 'Source verification failed: %s is missing.\n' "${preferences}" >&2
@@ -27,7 +30,16 @@ for feature in \
   "${umu_dxvk}:def restore" \
   "${umu_meson}:'dxvk_override.py'" \
   "${umu_executor}:def _configure_sync_environment" \
-  "${umu_executor}:argv = (mangohud, \"--dlsym\", *argv)"; do
+  "${umu_executor}:argv = (mangohud, \"--dlsym\", *argv)" \
+  "${library_blueprint}:label: _(\"Launch\");" \
+  "${library_blueprint}:label: _(\"Launch with Steam\");" \
+  "${library_view}:self.items_per_line = max(entry_count + 1, 1)" \
+  "${library_blueprint}:halign: fill;" \
+  "${library_blueprint}:valign: fill;" \
+  "${library_blueprint}:"library-entry-launch-pill"" \
+  "${library_style}:.library-entry-launch-pill {" \
+  "${library_style}:background-color: alpha(#000000, .48);" \
+  "${library_style}:padding: 10px 28px;"; do
   feature_file=${feature%%:*}
   feature_text=${feature#*:}
   if ! grep -Fq "${feature_text}" "${feature_file}"; then
@@ -36,6 +48,16 @@ for feature in \
     exit 1
   fi
 done
+
+if grep -Fq 'tooltip-text: _("Launch");' "${library_blueprint}"; then
+  printf '%s\n' 'Source verification failed: the invisible Launch tooltip regression is present.' >&2
+  exit 1
+fi
+
+if grep -Fq '.library-entry-launch-label {' "${library_style}"; then
+  printf '%s\n' 'Source verification failed: the floating Launch-label regression is present.' >&2
+  exit 1
+fi
 
 if grep -Eq '^[[:space:]]*if not gamemode_available:[[:space:]]*$' "${preferences}" &&
    sed -n '/if not gamemode_available:/,+2p' "${preferences}" | grep -Eq '^[[:space:]]*return[[:space:]]*$'; then
