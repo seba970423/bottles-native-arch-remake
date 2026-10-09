@@ -48,6 +48,177 @@ index 4d320ed..acac159 100644
      def install_umu_dependencies(
          self,
          game,
+diff --git a/bottles/backend/umu/display_backend.py b/bottles/backend/umu/display_backend.py
+new file mode 100644
+index 0000000..3a49fe4
+--- /dev/null
++++ b/bottles/backend/umu/display_backend.py
+@@ -0,0 +1,165 @@
++"""Launch-local Wine display selection; never edit the desktop or prefix registry."""
++
++import os
++import re
++import stat
++from collections.abc import Mapping
++from dataclasses import dataclass
++from gettext import gettext as _
++from pathlib import Path
++
++DISPLAY_BACKEND_IDS = ("proton", "wayland", "x11")
++_WAYLAND_KEYS = ("PROTON_ENABLE_WAYLAND", "PROTON_USE_WAYLAND")
++_DISPLAY_DRIVERS = {"winex11", "winex11.drv", "winewayland", "winewayland.drv"}
++_WAYLAND_CONTROL = re.compile(
++    r"check_environment\(\s*['\"]PROTON_(?:ENABLE|USE)_WAYLAND['\"]\s*,"
++    r"\s*['\"]wayland['\"]\s*\)"
++)
++
++
++@dataclass(frozen=True)
++class DisplayBackendResolution:
++    requested: str
++    backend: str
++    reason: str = ""
++
++    @property
++    def fallback(self) -> bool:
++        return self.requested != self.backend
++
++
++def _wayland_unavailable_reason(environment: Mapping[str, str]) -> str:
++    display = environment.get("WAYLAND_DISPLAY", "")
++    if not display:
++        return _("No Wayland display is available in this launch environment.")
++    socket_path = Path(display)
++    if not socket_path.is_absolute():
++        runtime = environment.get("XDG_RUNTIME_DIR", "")
++        if not runtime or not Path(runtime).is_absolute():
++            return _("The Wayland runtime directory is unavailable.")
++        socket_path = Path(runtime) / socket_path
++    try:
++        if not stat.S_ISSOCK(socket_path.stat().st_mode) or not os.access(
++            socket_path, os.R_OK | os.W_OK
++        ):
++            return _("The Wayland display socket is missing or inaccessible.")
++    except OSError:
++        return _("The Wayland display socket is missing or inaccessible.")
++
++    proton = Path(environment.get("PROTONPATH", "")).expanduser()
++    if not proton.is_absolute() or not proton.is_dir():
++        return _("Select an installed Proton runner to verify Wine-Wayland support.")
++    try:
++        # Inspect only the launcher, without executing it or downloading a runner.
++        with (proton / "proton").open(encoding="utf-8", errors="replace") as launcher:
++            source = launcher.read(2 * 1024 * 1024)
++    except OSError:
++        return _("The selected Proton launcher's Wayland controls could not be verified.")
++    if not _WAYLAND_CONTROL.search(source):
++        return _("The selected Proton launcher has no verified Wayland override.")
++
++    # Proton 10/11, classic multilib and new WoW64 layouts. A name alone is
++    # insufficient: require the actual Unix display driver as well.
++    for base in (proton / "files", proton / "dist", proton):
++        pe_driver_available = any(
++            (base / lib / "wine" / arch / "winewayland.drv").is_file()
++            for lib in ("lib64", "lib")
++            for arch in ("x86_64-windows", "i386-windows", "aarch64-windows")
++        )
++        for lib in ("lib64", "lib"):
++            wine = base / lib / "wine"
++            for arch in ("x86_64-unix", "i386-unix", "aarch64-unix", ""):
++                unix_directory = wine / arch
++                if (unix_directory / "winewayland.drv.so").is_file() or (
++                    pe_driver_available
++                    and (unix_directory / "winewayland.so").is_file()
++                ):
++                    return ""
++    return _("The selected Proton runner does not contain a complete Wine-Wayland driver.")
++
++
++def resolve_display_backend(
++    mode: object, environment: Mapping[str, str]
++) -> DisplayBackendResolution:
++    # Unknown persisted values behave like the default; malformed metadata must
++    # not introduce launch overrides or crash the launch.
++    if not isinstance(mode, str) or mode not in DISPLAY_BACKEND_IDS:
++        mode = "proton"
++    if mode == "proton":
++        return DisplayBackendResolution(mode, mode)
++    if mode == "wayland":
++        reason = _wayland_unavailable_reason(environment)
++        if not reason:
++            return DisplayBackendResolution(mode, mode)
++        fallback = "x11" if environment.get("DISPLAY") else "proton"
++        return DisplayBackendResolution(mode, fallback, reason)
++    if not environment.get("DISPLAY"):
++        return DisplayBackendResolution(
++            mode, "proton", _("No X11/XWayland display is available; using Proton Default.")
++        )
++    return DisplayBackendResolution(mode, mode)
++
++
++def _without_display_dll_overrides(value: str) -> str:
++    entries = []
++    for entry in value.split(";"):
++        names, separator, setting = entry.partition("=")
++        if not separator:
++            entries.append(entry)
++            continue
++        remaining = [
++            name for name in names.split(",")
++            if name.strip().lower() not in _DISPLAY_DRIVERS
++        ]
++        if len(remaining) == len(names.split(",")):
++            entries.append(entry)
++        elif remaining:
++            entries.append(",".join(remaining) + "=" + setting)
++    return ";".join(entries)
++
++
++def configure_display_environment(
++    mode: object, environment: dict[str, str]
++) -> DisplayBackendResolution:
++    resolution = resolve_display_backend(mode, environment)
++    if resolution.backend == "proton":
++        return resolution
++
++    enabled = resolution.backend == "wayland"
++    # Set both aliases to the same value. Older runners read ENABLE only;
++    # newer runners may read USE after ENABLE, so leaving an alias behind is
++    # contradictory. Setting 0 also defeats runner user_settings defaults.
++    for key in _WAYLAND_KEYS:
++        environment[key] = "1" if enabled else "0"
++    environment["WINE_GRAPHICS_DRIVER"] = resolution.backend
++    environment.pop("PROTON_USE_X11_EXCLUSIVE", None)
++
++    for key in ("PROTON_ADD_CONFIG", "STEAM_COMPAT_CONFIG"):
++        value = environment.get(key)
++        if value is not None and any(
++            flag.strip().lower() == "wayland" for flag in value.split(",")
++        ):
++            environment[key] = ",".join(
++                flag for flag in value.split(",")
++                if flag.strip().lower() != "wayland"
++            )
++
++    overrides = _without_display_dll_overrides(
++        environment.get("WINEDLLOVERRIDES", "")
++    )
++    if enabled:
++        # Native Wayland OpenGL requires EGL. Let the runner handle its own
++        # launcher exceptions; do not disable winex11 globally on this path.
++        environment["WINE_USE_EGL"] = "1"
++    else:
++        # Also cover runners without Proton's Wayland switches and prefixes
++        # whose driver ordering prefers Wayland. Keep DISPLAY/WAYLAND_DISPLAY
++        # intact for non-Wine launcher/toolkit processes.
++        overrides = ";".join(
++            part for part in (overrides, "winewayland.drv=;winex11.drv=b") if part
++        )
++    if overrides:
++        environment["WINEDLLOVERRIDES"] = overrides
++    else:
++        environment.pop("WINEDLLOVERRIDES", None)
++    return resolution
 diff --git a/bottles/backend/umu/dxvk_override.py b/bottles/backend/umu/dxvk_override.py
 new file mode 100644
 index 0000000..ccde842
@@ -211,7 +382,7 @@ index 0000000..ccde842
 +    native = f"{DXVK_OVERRIDE_KEYS}=n,b"
 +    environment["WINEDLLOVERRIDES"] = f"{existing};{native}" if existing else native
 diff --git a/bottles/backend/umu/executor.py b/bottles/backend/umu/executor.py
-index ac5264e..ef093c2 100644
+index ac5264e..7db4d3e 100644
 --- a/bottles/backend/umu/executor.py
 +++ b/bottles/backend/umu/executor.py
 @@ -1,6 +1,7 @@
@@ -222,10 +393,11 @@ index ac5264e..ef093c2 100644
  import signal
  import subprocess
  import sys
-@@ -15,6 +16,10 @@ from uuid import UUID
+@@ -15,6 +16,11 @@ from uuid import UUID
  from bottles.backend.globals import Paths
  from bottles.backend.managers.sandbox import SandboxManager
  from bottles.backend.umu.models import UmuGame
++from bottles.backend.umu.display_backend import configure_display_environment
 +from bottles.backend.umu.dxvk_override import (
 +    UmuDxvkOverrideError,
 +    configure_dxvk_environment,
@@ -233,7 +405,7 @@ index ac5264e..ef093c2 100644
  from bottles.backend.umu.processes import prefix_has_process
  from bottles.backend.umu.proton import UmuProtonCatalog
  from bottles.backend.umu.provider import UmuInstallation
-@@ -64,6 +69,13 @@ class UmuWinetricksError(ValueError):
+@@ -64,6 +70,13 @@ class UmuWinetricksError(ValueError):
  
  
  _WINETRICKS_VERB_PATTERN = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_-]*(=[a-zA-Z0-9]*)?$")
@@ -247,7 +419,7 @@ index ac5264e..ef093c2 100644
  _SESSION_BUS_PREFIX = "unix:path="
  
  
-@@ -135,6 +147,39 @@ class UmuExecutor:
+@@ -135,6 +148,39 @@ class UmuExecutor:
      def _absolute_path(path: Path) -> Path:
          return path.expanduser().resolve(strict=False)
  
@@ -287,7 +459,7 @@ index ac5264e..ef093c2 100644
      def _sandbox_proton(
          self, game: UmuGame, proton: str
      ) -> tuple[str, tuple[Path, ...]]:
-@@ -251,18 +296,137 @@ class UmuExecutor:
+@@ -251,18 +297,152 @@ class UmuExecutor:
              if game.working_directory
              else None
          )
@@ -310,6 +482,21 @@ index ac5264e..ef093c2 100644
 +
          environment, readable_paths = self._environment(game, prefix_only=False)
 +        self._configure_sync_environment(game, environment)
++        display = configure_display_environment(
++            game.extra.get("display_backend", "proton"), environment
++        )
++        if display.fallback:
++            fallback = "X11/XWayland" if display.backend == "x11" else "Proton Default"
++            print(
++                f"Bottles: {display.reason} Using {fallback} for this launch.",
++                file=sys.stderr,
++            )
++        elif display.backend != "proton":
++            print(
++                f"Bottles: requesting Wine display backend: {display.backend} "
++                "(runtime use must be verified in the game).",
++                file=sys.stderr,
++            )
 +        dxvk_selection = game.extra.get("dxvk_override", "proton")
 +        dxvk_ready = True
 +        if game.prefix.managed and dxvk_selection not in ("proton", "wined3d"):
@@ -430,7 +617,7 @@ index ac5264e..ef093c2 100644
      def prepare_prefix(self, game: UmuGame) -> UmuCommand:
          environment, readable_paths = self._environment(game, prefix_only=True)
          return UmuCommand(
-@@ -411,6 +575,7 @@ class UmuExecutor:
+@@ -411,6 +591,7 @@ class UmuExecutor:
              )
              tracked = _TrackedProcess(process=process, pgid=process.pid)
              self._processes[game.id] = tracked
@@ -439,13 +626,14 @@ index ac5264e..ef093c2 100644
                  target=self._read_output,
                  args=(game, tracked),
 diff --git a/bottles/backend/umu/meson.build b/bottles/backend/umu/meson.build
-index 594dc01..17ea265 100644
+index 594dc01..6da3a5a 100644
 --- a/bottles/backend/umu/meson.build
 +++ b/bottles/backend/umu/meson.build
-@@ -5,6 +5,7 @@ bottles_sources = [
+@@ -5,6 +5,8 @@ bottles_sources = [
    '__init__.py',
    'database.py',
    'dependencies.py',
++  'display_backend.py',
 +  'dxvk_override.py',
    'executor.py',
    'models.py',
@@ -468,10 +656,10 @@ index 6ff7c01..c26ea0b 100644
    '__init__.py',
    'main.py',
 diff --git a/bottles/frontend/ui/dialog-umu-game.blp b/bottles/frontend/ui/dialog-umu-game.blp
-index 78adbc1..a4ab246 100644
+index 78adbc1..855d7e1 100644
 --- a/bottles/frontend/ui/dialog-umu-game.blp
 +++ b/bottles/frontend/ui/dialog-umu-game.blp
-@@ -117,6 +117,34 @@ template $UmuGameDialog: Adw.Dialog {
+@@ -117,6 +117,40 @@ template $UmuGameDialog: Adw.Dialog {
        Adw.PreferencesGroup {
          title: _("Launch");
  
@@ -485,6 +673,12 @@ index 78adbc1..a4ab246 100644
 +          title: _("Synchronization");
 +          subtitle: _("The selected Proton runner may already enable NTSYNC automatically. Use overrides for compatibility testing.");
 +          model: StringList sync_backends {};
++        }
++
++        Adw.ComboRow combo_display_backend {
++          title: _("Display Backend");
++          subtitle: _("Choose Wine's display driver, not the desktop session. Restart all game and launcher processes after changing it.");
++          model: StringList display_backends {};
 +        }
 +
 +        Adw.ComboRow combo_performance_backend {
@@ -851,7 +1045,7 @@ index bc14a8e..40db59a 100644
      # hide() and show() are essentialy workarounds to avoid keeping
      # the empty space of the hidden entry in the GtkFlowBox
 diff --git a/bottles/frontend/windows/umu.py b/bottles/frontend/windows/umu.py
-index 4ec2f72..9d7a41d 100644
+index 4ec2f72..a42a1cd 100644
 --- a/bottles/frontend/windows/umu.py
 +++ b/bottles/frontend/windows/umu.py
 @@ -14,7 +14,10 @@
@@ -865,7 +1059,18 @@ index 4ec2f72..9d7a41d 100644
  from concurrent.futures import ThreadPoolExecutor
  from gettext import gettext as _, ngettext
  from pathlib import Path
-@@ -42,6 +45,9 @@ logging = Logger()
+@@ -32,6 +35,10 @@ from bottles.backend.umu import (
+     UmuPrefix,
+     UmuRepositoryError,
+ )
++from bottles.backend.umu.display_backend import (
++    DISPLAY_BACKEND_IDS,
++    resolve_display_backend,
++)
+ from bottles.backend.utils.manager import ManagerUtils
+ from bottles.backend.utils.threading import RunAsync
+ from bottles.frontend.utils.sh import ShUtils
+@@ -42,6 +49,9 @@ logging = Logger()
  
  STORE_IDS = UMU_STORE_IDS
  DEPENDENCY_TOOL_IDS = ("bottles", "winetricks")
@@ -875,7 +1080,7 @@ index 4ec2f72..9d7a41d 100644
  
  
  def _store_labels():
-@@ -59,6 +65,31 @@ def _dependency_tool_labels():
+@@ -59,6 +69,39 @@ def _dependency_tool_labels():
      return (_("Bottles Dependencies"), "Winetricks")
  
  
@@ -904,10 +1109,18 @@ index 4ec2f72..9d7a41d 100644
 +    )
 +
 +
++def _display_backend_labels():
++    return (
++        _("Proton Default (Recommended)"),
++        _("Native Wayland (Experimental)"),
++        _("X11 / XWayland"),
++    )
++
++
  def _selected_id(combo, values):
      position = combo.get_selected()
      if position >= len(values):
-@@ -672,6 +703,8 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -672,6 +715,8 @@ class UmuInstallDialog(Adw.Dialog):
      status_error = Gtk.Template.Child()
      row_identity = Gtk.Template.Child()
      row_store = Gtk.Template.Child()
@@ -916,7 +1129,7 @@ index 4ec2f72..9d7a41d 100644
      row_setup_identity = Gtk.Template.Child()
      row_setup_store = Gtk.Template.Child()
      page_files = Gtk.Template.Child()
-@@ -720,6 +753,9 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -720,6 +765,9 @@ class UmuInstallDialog(Adw.Dialog):
          self._pulse_source = None
          self._stop_requested = False
          self._install_status = None
@@ -926,7 +1139,7 @@ index 4ec2f72..9d7a41d 100644
  
          self.source_modes.append(_("Run an Installer"))
          self.source_modes.append(_("Use a Portable Executable"))
-@@ -745,6 +781,7 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -745,6 +793,7 @@ class UmuInstallDialog(Adw.Dialog):
              store = _store_title(self.database_entry.store)
          self.row_identity.set_subtitle(identity)
          self.row_store.set_subtitle(store)
@@ -934,7 +1147,7 @@ index 4ec2f72..9d7a41d 100644
          self.row_setup_identity.set_subtitle(identity)
          self.row_setup_store.set_subtitle(store)
          self.label_proton.set_label(
-@@ -757,6 +794,7 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -757,6 +806,7 @@ class UmuInstallDialog(Adw.Dialog):
          self.btn_executable.connect("clicked", self.__choose_executable)
          self.btn_done.connect("clicked", lambda *_args: self.close())
          self.btn_retry.connect("clicked", self.__retry)
@@ -942,7 +1155,7 @@ index 4ec2f72..9d7a41d 100644
          self.row_proton.connect("activated", self.__choose_proton)
          self.combo_source.connect("notify::selected", self.__source_changed)
          self.entry_name.connect("changed", self.__update_navigation)
-@@ -870,7 +908,10 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -870,7 +920,10 @@ class UmuInstallDialog(Adw.Dialog):
      def __next(self, *_args):
          page = self.stack.get_visible_child_name()
          if page == "intro":
@@ -954,7 +1167,7 @@ index 4ec2f72..9d7a41d 100644
          elif page == "installer" and self.installer is not None:
              self.__set_page("setup")
          elif page == "setup":
-@@ -881,6 +922,56 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -881,6 +934,56 @@ class UmuInstallDialog(Adw.Dialog):
          elif page == "executable" and self.executable is not None:
              self.__finish()
  
@@ -1011,7 +1224,7 @@ index 4ec2f72..9d7a41d 100644
      def __choose_source_file(self, *_args):
          def selected(dialog, result):
              try:
-@@ -942,6 +1033,9 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -942,6 +1045,9 @@ class UmuInstallDialog(Adw.Dialog):
          extra = {
              **game.extra,
              "dependency_tool": dependency_tool,
@@ -1021,7 +1234,7 @@ index 4ec2f72..9d7a41d 100644
              "source_mode": "portable" if self.__portable else "installer",
          }
          if not self.__portable:
-@@ -1376,6 +1470,9 @@ class UmuAddGameDialog(Adw.Dialog):
+@@ -1376,6 +1482,9 @@ class UmuAddGameDialog(Adw.Dialog):
          extra = {
              **game.extra,
              "dependency_tool": dependency_tool,
@@ -1031,7 +1244,7 @@ index 4ec2f72..9d7a41d 100644
              "source_mode": "imported" if importing else "installer",
          }
          if not importing:
-@@ -1415,6 +1512,13 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1415,6 +1524,15 @@ class UmuGameDialog(Adw.Dialog):
      entry_game_id = Gtk.Template.Child()
      combo_store = Gtk.Template.Child()
      stores = Gtk.Template.Child()
@@ -1041,11 +1254,13 @@ index 4ec2f72..9d7a41d 100644
 +    dxvk_overrides = Gtk.Template.Child()
 +    combo_sync_backend = Gtk.Template.Child()
 +    sync_backends = Gtk.Template.Child()
++    combo_display_backend = Gtk.Template.Child()
++    display_backends = Gtk.Template.Child()
 +    switch_mangohud = Gtk.Template.Child()
      row_arguments = Gtk.Template.Child()
      row_working_directory = Gtk.Template.Child()
      btn_working_directory = Gtk.Template.Child()
-@@ -1448,6 +1552,16 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1448,6 +1566,16 @@ class UmuGameDialog(Adw.Dialog):
          )
          self.arguments = tuple(game.arguments)
          self.environment = dict(game.environment)
@@ -1062,7 +1277,7 @@ index 4ec2f72..9d7a41d 100644
          self.switch_sandbox.set_active(game.sandbox)
          self.switch_network.set_active(game.share_net)
          self.installed_dependency_rows = []
-@@ -1456,6 +1570,14 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1456,6 +1584,16 @@ class UmuGameDialog(Adw.Dialog):
              self.stores.append(label)
          for label in _dependency_tool_labels():
              self.dependency_tools.append(label)
@@ -1070,6 +1285,8 @@ index 4ec2f72..9d7a41d 100644
 +            self.performance_backends.append(label)
 +        for label in _sync_backend_labels():
 +            self.sync_backends.append(label)
++        for label in _display_backend_labels():
++            self.display_backends.append(label)
 +        self.dxvk_overrides.append(_("Bundled with selected Proton (Recommended)"))
 +        self.dxvk_overrides.append(_("WineD3D (Disable DXVK)"))
 +        for version in window.manager.dxvk_available:
@@ -1077,7 +1294,7 @@ index 4ec2f72..9d7a41d 100644
  
          self.entry_name.set_text(game.name)
          self.row_executable.set_subtitle(self.executable)
-@@ -1471,6 +1593,22 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1471,6 +1609,28 @@ class UmuGameDialog(Adw.Dialog):
          )
          self.entry_game_id.set_text(game.game_id)
          _select_id(self.combo_store, STORE_IDS, game.store)
@@ -1097,10 +1314,16 @@ index 4ec2f72..9d7a41d 100644
 +            SYNC_BACKEND_IDS,
 +            game.extra.get("sync_backend", "proton"),
 +        )
++        _select_id(
++            self.combo_display_backend,
++            DISPLAY_BACKEND_IDS,
++            game.extra.get("display_backend", "proton"),
++        )
++        self.__update_display_backend()
          self.__update_arguments()
          self.__update_environment()
          self.__update_working_directory()
-@@ -1491,6 +1629,7 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1491,6 +1651,7 @@ class UmuGameDialog(Adw.Dialog):
          self.btn_executable.connect("clicked", self.__choose_executable)
          self.btn_prefix.connect("clicked", self.__prefix_action)
          self.btn_proton.connect("clicked", self.__choose_proton)
@@ -1108,17 +1331,67 @@ index 4ec2f72..9d7a41d 100644
          self.row_arguments.connect("activated", self.__choose_arguments)
          self.row_environment.connect("activated", self.__choose_environment)
          self.btn_working_directory.connect("clicked", self.__choose_working_directory)
-@@ -1504,6 +1643,9 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1504,6 +1665,12 @@ class UmuGameDialog(Adw.Dialog):
          self.combo_dependency_tool.connect(
              "notify::selected", self.__dependency_tool_changed
          )
 +        self.combo_performance_backend.connect(
 +            "notify::selected", self.__performance_backend_changed
 +        )
++        self.combo_display_backend.connect(
++            "notify::selected", self.__display_backend_changed
++        )
          self.entry_winetricks.connect("changed", self.__dependency_tool_changed)
          self.btn_remove.connect("clicked", self.__confirm_remove)
          self.__validate_settings()
-@@ -1662,6 +1804,13 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1654,6 +1821,46 @@ class UmuGameDialog(Adw.Dialog):
+     def __set_proton(self, value, title):
+         self.proton = value
+         self.label_proton.set_label(title)
++        self.__update_display_backend()
++
++    def __display_backend_changed(self, *_args):
++        self.__update_display_backend(notify=True)
++
++    def __update_display_backend(self, *, notify=False):
++        # Do not resolve/download an automatic Proton selection just to open
++        # settings. Launch-time checks use the executor's resolved PROTONPATH.
++        proton = self.proton
++        if proton in self.window.manager.runners_available:
++            proton = ManagerUtils.get_runner_path(proton)
++        environment = {**os.environ, **self.environment, "PROTONPATH": str(proton)}
++        mode = _selected_id(self.combo_display_backend, DISPLAY_BACKEND_IDS)
++        resolution = resolve_display_backend(mode, environment)
++        if resolution.fallback:
++            fallback = (
++                _("X11 / XWayland") if resolution.backend == "x11"
++                else _("Proton Default")
++            )
++            subtitle = _("{0} Launch fallback: {1}.").format(
++                resolution.reason, fallback
++            )
++        elif mode == "wayland":
++            subtitle = _(
++                "Wayland socket and runner support verified. Experimental; "
++                "restart all game and launcher processes."
++            )
++        elif mode == "x11":
++            subtitle = _(
++                "Requests Wine's X11 driver (XWayland on a Wayland desktop). "
++                "Restart all game and launcher processes."
++            )
++        else:
++            subtitle = _(
++                "Leaves all manual display variables untouched and lets Proton "
++                "decide. This does not change your desktop session."
++            )
++        self.combo_display_backend.set_subtitle(subtitle)
++        if notify and resolution.fallback:
++            self.window.show_toast(subtitle)
+ 
+     def __choose_arguments(self, *_args):
+         UmuArgumentsDialog(
+@@ -1662,6 +1869,13 @@ class UmuGameDialog(Adw.Dialog):
              self.__set_arguments,
          ).present(self)
  
@@ -1132,7 +1405,7 @@ index 4ec2f72..9d7a41d 100644
      def __set_arguments(self, arguments):
          self.arguments = tuple(arguments)
          self.__update_arguments()
-@@ -1671,6 +1820,239 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1671,6 +1885,239 @@ class UmuGameDialog(Adw.Dialog):
              shlex.join(self.arguments) if self.arguments else _("None")
          )
  
@@ -1372,7 +1645,7 @@ index 4ec2f72..9d7a41d 100644
      def __choose_environment(self, *_args):
          UmuEnvironmentDialog(
              self.window,
-@@ -1680,6 +2062,10 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1680,7 +2127,12 @@ class UmuGameDialog(Adw.Dialog):
  
      def __set_environment(self, environment):
          self.environment = dict(environment)
@@ -1381,9 +1654,11 @@ index 4ec2f72..9d7a41d 100644
 +            not in ("", "0", "false", "no", "off")
 +        )
          self.__update_environment()
++        self.__update_display_backend()
  
      def __update_environment(self):
-@@ -1727,6 +2113,15 @@ class UmuGameDialog(Adw.Dialog):
+         count = len(self.environment)
+@@ -1727,6 +2179,18 @@ class UmuGameDialog(Adw.Dialog):
                  "dependency_tool": _selected_id(
                      self.combo_dependency_tool, DEPENDENCY_TOOL_IDS
                  ),
@@ -1395,6 +1670,9 @@ index 4ec2f72..9d7a41d 100644
 +                ),
 +                "sync_backend": _selected_id(
 +                    self.combo_sync_backend, SYNC_BACKEND_IDS
++                ),
++                "display_backend": _selected_id(
++                    self.combo_display_backend, DISPLAY_BACKEND_IDS
 +                ),
              }
              state = self.game.state

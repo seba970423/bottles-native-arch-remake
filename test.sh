@@ -13,6 +13,11 @@ if command -v shellcheck >/dev/null 2>&1; then
   shellcheck "${repo_root}"/*.sh
 fi
 
+# Optional explicit patched-source path for non-Arch development environments.
+if [[ $# -gt 0 ]]; then
+  "${repo_root}/verify-source.sh" "$1"
+fi
+
 if command -v makepkg >/dev/null 2>&1; then
   cd "${repo_root}"
   makepkg --verifysource

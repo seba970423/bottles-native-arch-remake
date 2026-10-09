@@ -178,7 +178,67 @@ unsupported NTSYNC never prevents a game from launching. To verify actual
 NTSYNC use while a game is running, use `lsof /dev/ntsync`; overlay indicators
 alone may be inaccurate.
 
-#### Tested example
+### Per-game display backend (Wayland / X11)
+
+UMU games expose **Display Backend** under **Game Settings → Launch**. This
+selects Wine's display driver; it does not log you out, change your desktop
+session, replace GPU drivers, or change the DXVK/WineD3D renderer.
+
+- **Proton Default (Recommended)** — leaves every manual display variable
+  unchanged and lets the selected Proton runner decide. Existing games use
+  this mode automatically.
+- **Native Wayland (Experimental)** — requires an accessible Wayland socket,
+  an installed runner with a verified Wayland launcher control, and the actual
+  Wine-Wayland driver (`winewayland.so` with its `winewayland.drv` companion,
+  or the legacy `winewayland.drv.so` layout). Requests both `PROTON_ENABLE_WAYLAND=1` and
+  `PROTON_USE_WAYLAND=1`, plus EGL for native Wayland OpenGL. Supported runner
+  versions may retain their own per-executable X11 launcher exceptions.
+- **X11 / XWayland** — requests Wine's X11 driver. On a Wayland desktop this
+  uses XWayland; on an X11 desktop it uses X11. Both Wayland aliases are set to
+  `0`, and launch-local display DLL overrides prevent the Wayland driver from
+  winning through a prefix's driver order.
+
+Forced modes remove only conflicting display-driver DLL overrides, the
+`wayland` token in Proton compatibility flags, and the per-executable X11
+exception override. Other DLL overrides, renderer choices, synchronization,
+MangoHud and toolkit variables remain intact. `DISPLAY` and `WAYLAND_DISPLAY`
+are not hidden from launchers. Returning to Default restores normal behavior
+because overrides are built in a fresh launch environment, not written into
+the game environment or prefix registry.
+
+Unavailable native Wayland requests fall back to X11/XWayland when `DISPLAY`
+exists, or to Proton Default when there is no X11 display. Settings show the
+preflight reason and notify on an unsupported selection; the launch log records
+the launch-time fallback. The saved preference remains unchanged. Preflight
+checks do not prove runtime driver use or game compatibility, and a `DISPLAY`
+value does not guarantee the X server is reachable. The tool never retries a
+game automatically after a crash or claims that fallback will repair it.
+
+For automatic `UMU-Proton`/`GE-Proton` selections, Bottles cannot inspect the
+runner before UMU resolves it. Native Wayland therefore falls back rather than
+guessing. Select a specific installed, Wayland-capable runner such as DWProton
+to use native Wayland. Detection is based on files and controls, not branding.
+
+Close **all game and launcher processes using the prefix** before switching.
+Native Wayland is experimental; input, controllers, multi-monitor behavior,
+launchers and OpenGL/WineD3D compatibility depend on the runner and game.
+No universal performance improvement is promised.
+
+To verify the actual game window in KDE, open KWin's Debug Console
+(`qdbus6 org.kde.KWin /KWin org.kde.KWin.showDebugConsole`) and inspect the
+game under its Wayland or X11 windows, not merely its launcher. On Hyprland,
+`hyprctl clients` reports whether a window uses XWayland. A Proton variable or
+loaded driver file alone is not conclusive, especially with mixed-backend
+launcher exceptions.
+
+The dependency-free regression suite runs from `verify-source.sh` during
+`makepkg` preparation. For a manually patched upstream checkout:
+
+```bash
+./test.sh /path/to/patched/Bottles-67.4
+```
+
+#### Tested WineD3D example
 
 Goddess of Victory: NIKKE was tested with DWProton and WineD3D on an AMD
 RX 6600 and Intel UHD 620. On both systems, WineD3D eliminated observable

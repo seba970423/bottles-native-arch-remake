@@ -10,6 +10,7 @@ umu_game_blueprint="${source_root}/bottles/frontend/ui/dialog-umu-game.blp"
 umu_dxvk="${source_root}/bottles/backend/umu/dxvk_override.py"
 umu_meson="${source_root}/bottles/backend/umu/meson.build"
 umu_executor="${source_root}/bottles/backend/umu/executor.py"
+umu_display="${source_root}/bottles/backend/umu/display_backend.py"
 library_blueprint="${source_root}/bottles/frontend/ui/library-entry.blp"
 library_widget="${source_root}/bottles/frontend/widgets/library.py"
 library_view="${source_root}/bottles/frontend/views/library.py"
@@ -26,11 +27,19 @@ for feature in \
   "${umu_blueprint}:Managed Prefix Location" \
   "${umu_game_blueprint}:combo_dxvk_override" \
   "${umu_game_blueprint}:combo_sync_backend" \
+  "${umu_game_blueprint}:combo_display_backend" \
   "${umu_dialog}:SYNC_BACKEND_IDS" \
+  "${umu_dialog}:DISPLAY_BACKEND_IDS" \
+  "${umu_dialog}:def __update_display_backend" \
+  "${umu_dialog}:\"display_backend\": _selected_id(" \
   "${umu_dxvk}:class UmuDxvkOverride" \
   "${umu_dxvk}:def restore" \
   "${umu_meson}:'dxvk_override.py'" \
+  "${umu_meson}:'display_backend.py'" \
+  "${umu_display}:def configure_display_environment" \
+  "${umu_display}:def resolve_display_backend" \
   "${umu_executor}:def _configure_sync_environment" \
+  "${umu_executor}:display = configure_display_environment(" \
   "${umu_executor}:argv = (mangohud, \"--dlsym\", *argv)" \
   "${library_blueprint}:label: _(\"Launch\");" \
   "${library_blueprint}:label: _(\"Launch with Steam\");" \
@@ -107,5 +116,8 @@ if grep -Eq 'running_under_sandbox\(\).*return|\.flatpak-info' \
   printf '%s\n' 'Source verification failed: native-execution blockers remain after patching.' >&2
   exit 1
 fi
+
+script_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+python3 "${script_root}/test-display-backend.py" "${source_root}"
 
 printf '%s\n' 'Source verification passed: native initialization and UMU safety guards look sane.'

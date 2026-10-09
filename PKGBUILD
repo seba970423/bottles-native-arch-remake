@@ -3,7 +3,7 @@
 pkgname=bottles-native-arch
 _pkgname=Bottles
 pkgver=67.4
-pkgrel=10
+pkgrel=11
 epoch=2
 pkgdesc='Latest upstream Bottles, packaged natively for Arch Linux'
 arch=(any)
@@ -65,12 +65,14 @@ source=(
   "${_pkgname}-${pkgver}.tar.gz::https://github.com/bottlesdevs/Bottles/archive/refs/tags/${pkgver}.tar.gz"
   native-arch.patch
   verify-source.sh
+  test-display-backend.py
   system76-pipewire-workaround.sh
 )
 sha256sums=(
   'eb417e37851921565664c9dbe2713f94e643f0963d3c6c89afc4cf2bcd7aff3c'
-  '9fb7bb6668093883c9a24fd726f4a6dda152682d2d0f8b48049471d79f750c2e'
-  'cf65a05d53fe09379e2fa64ed0f17b8d9a984191665efd8e42759b635c7d487e'
+  '69adf3f9944d66c180fc8f88648519616898c78bd529bcb311715bbae6ef3a9d'
+  'f71525ac8a7b84321a35b3b413123e87f95526bcf8952147cc9c5a9a176edb12'
+  '3eecf5bd1821601124d706ab52355aeed4c701720dd4fd3673b053dea784defb'
   'df33a555ec11517841667948c8f2702719bd5d3887ee012efd73703661235d2a'
 )
 
