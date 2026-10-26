@@ -429,6 +429,34 @@ class GamescopeTests(unittest.TestCase):
                 else:
                     self.assertIn(scaler, result.arguments)
 
+    def test_scaling_modes_keep_legacy_fit_and_apply_to_every_noninteger_filter(self):
+        for filter_id in gamescope.GAMESCOPE_FILTER_IDS:
+            for mode in gamescope.GAMESCOPE_SCALING_MODE_IDS:
+                with self.subTest(filter=filter_id, mode=mode):
+                    value = {**self.settings, "filter": filter_id, "scaling_mode": mode}
+                    result = gamescope.resolve_gamescope(value, self.environment)
+                    self.assertTrue(result.active)
+                    if filter_id == "integer":
+                        self.assertEqual(result.arguments.count("-S"), 1)
+                        self.assertEqual(result.arguments[result.arguments.index("-S") + 1], "integer")
+                    elif mode == "auto":
+                        self.assertNotIn("-S", result.arguments)
+                    else:
+                        self.assertEqual(result.arguments.count("-S"), 1)
+                        self.assertEqual(result.arguments[result.arguments.index("-S") + 1], mode)
+                        self.assertEqual(result.arguments[result.arguments.index("-F") + 1], filter_id)
+        legacy = gamescope.GamescopeSettings.from_dict(self.settings)
+        self.assertEqual(legacy.scaling_mode, "auto")
+
+    def test_invalid_scaling_modes_fall_back_without_changing_saved_preferences(self):
+        for mode in (None, [], {}, "--help", "integer"):
+            with self.subTest(mode=mode):
+                value = {**self.settings, "scaling_mode": mode}
+                result = gamescope.resolve_gamescope(value, self.environment)
+                self.assertFalse(result.active)
+                self.assertTrue(result.reason)
+                self.assertEqual(value["scaling_mode"], mode)
+
     def test_missing_gamescope_restores_selected_display_and_overlay(self):
         (self.bin / "gamescope").unlink()
         game = self.game(display_backend="x11", dxvk_override="wined3d")

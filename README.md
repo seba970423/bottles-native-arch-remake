@@ -247,6 +247,12 @@ It starts disabled for existing games. Enabling it reveals controls for:
   presets from `640x480` to `7680x4320`, including 720p, 1080p, 1440p, 4K and
   ultrawide modes. Select **Custom…** only when you need another size.
 - **Linear**, **AMD FSR 1**, **NIS**, **Integer**, or **Nearest Neighbour** scaling.
+- **Scaling Mode**, independent of the filter: **Fit** keeps
+  the full image and may leave bars; **Fill (Crop)** preserves proportions
+  but can hide controls at the edges; **Stretch** avoids cropping
+  while allowing distortion. Integer Scaling overrides this mode with whole-number
+  enlargement; the selected mode is retained for other filters. Existing games
+  retain their previous Fit behaviour.
 - **Sharpness** for FSR 1/NIS: `0` is sharpest, `20` is softest.
 - **FPS Limit** (`0` leaves it unlimited) and **Fullscreen**.
 
@@ -285,6 +291,13 @@ become Windows executable arguments or prefix registry changes. Lower rendering
 resolutions may help GPU-bound games; enabling Gamescope at the same resolution
 does not guarantee higher FPS or lower latency. Real GPU/game benchmarking is
 still required, including NIKKE cursor response with WineD3D.
+
+For example, `1680x1050` is 16:10 while `1920x1080` is 16:9. Fit therefore leaves
+side bars even in fullscreen. To keep that rendering resolution and fill 1080p,
+choose Stretch and accept the wider image, or use a 16:9 game resolution such as
+`1600x900` to preserve proportions. KDE fractional scaling can also affect window
+sizing independently of this aspect-ratio choice; changing the scaling mode is
+not a frame-pacing fix.
 
 The dependency-free regression suite covers Gamescope options, malformed
 metadata, legacy/off behaviour, missing dependencies, Wayland-only hosts,
