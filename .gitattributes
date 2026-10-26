@@ -1,0 +1,2 @@
+# Blank context lines in unified patches contain one required space.
+native-arch.patch -whitespace

@@ -11,6 +11,7 @@ umu_dxvk="${source_root}/bottles/backend/umu/dxvk_override.py"
 umu_meson="${source_root}/bottles/backend/umu/meson.build"
 umu_executor="${source_root}/bottles/backend/umu/executor.py"
 umu_display="${source_root}/bottles/backend/umu/display_backend.py"
+umu_gamescope="${source_root}/bottles/backend/umu/gamescope.py"
 library_blueprint="${source_root}/bottles/frontend/ui/library-entry.blp"
 library_widget="${source_root}/bottles/frontend/widgets/library.py"
 library_view="${source_root}/bottles/frontend/views/library.py"
@@ -28,6 +29,13 @@ for feature in \
   "${umu_game_blueprint}:combo_dxvk_override" \
   "${umu_game_blueprint}:combo_sync_backend" \
   "${umu_game_blueprint}:combo_display_backend" \
+  "${umu_game_blueprint}:switch_gamescope" \
+  "${umu_game_blueprint}:entry_gamescope_game_resolution" \
+  "${umu_game_blueprint}:entry_gamescope_output_resolution" \
+  "${umu_game_blueprint}:combo_gamescope_filter" \
+  "${umu_game_blueprint}:spin_gamescope_fps" \
+  "${umu_dialog}:def __gamescope_settings" \
+  "${umu_dialog}:\"gamescope\": self.__gamescope_settings().to_dict()" \
   "${umu_dialog}:SYNC_BACKEND_IDS" \
   "${umu_dialog}:DISPLAY_BACKEND_IDS" \
   "${umu_dialog}:def __update_display_backend" \
@@ -36,10 +44,16 @@ for feature in \
   "${umu_dxvk}:def restore" \
   "${umu_meson}:'dxvk_override.py'" \
   "${umu_meson}:'display_backend.py'" \
+  "${umu_meson}:'gamescope.py'" \
+  "${umu_gamescope}:class GamescopeSettings" \
+  "${umu_gamescope}:def resolve_gamescope" \
+  "${umu_gamescope}:def wrap_gamescope" \
   "${umu_display}:def configure_display_environment" \
   "${umu_display}:def resolve_display_backend" \
   "${umu_executor}:def _configure_sync_environment" \
   "${umu_executor}:display = configure_display_environment(" \
+  "${umu_executor}:nested_x11=gamescope.active" \
+  "${umu_executor}:argv, overlay_reason = wrap_gamescope(" \
   "${umu_executor}:argv = (mangohud, \"--dlsym\", *argv)" \
   "${library_blueprint}:label: _(\"Launch\");" \
   "${library_blueprint}:label: _(\"Launch with Steam\");" \

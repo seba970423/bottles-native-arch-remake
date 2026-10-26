@@ -50,10 +50,10 @@ index 4d320ed..acac159 100644
          game,
 diff --git a/bottles/backend/umu/display_backend.py b/bottles/backend/umu/display_backend.py
 new file mode 100644
-index 0000000..3a49fe4
+index 0000000..45be1d7
 --- /dev/null
 +++ b/bottles/backend/umu/display_backend.py
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,171 @@
 +"""Launch-local Wine display selection; never edit the desktop or prefix registry."""
 +
 +import os
@@ -175,9 +175,15 @@ index 0000000..3a49fe4
 +
 +
 +def configure_display_environment(
-+    mode: object, environment: dict[str, str]
++    mode: object, environment: dict[str, str], *, nested_x11: bool = False
 +) -> DisplayBackendResolution:
-+    resolution = resolve_display_backend(mode, environment)
++    # Gamescope creates its XWayland display after this command is prepared,
++    # including on Wayland-only desktops with no host DISPLAY. Do not insert
++    # a fake DISPLAY or preflight the host runner's Wayland driver in that case.
++    resolution = (
++        DisplayBackendResolution("x11", "x11") if nested_x11
++        else resolve_display_backend(mode, environment)
++    )
 +    if resolution.backend == "proton":
 +        return resolution
 +
@@ -382,7 +388,7 @@ index 0000000..ccde842
 +    native = f"{DXVK_OVERRIDE_KEYS}=n,b"
 +    environment["WINEDLLOVERRIDES"] = f"{existing};{native}" if existing else native
 diff --git a/bottles/backend/umu/executor.py b/bottles/backend/umu/executor.py
-index ac5264e..7db4d3e 100644
+index ac5264e..af7ac86 100644
 --- a/bottles/backend/umu/executor.py
 +++ b/bottles/backend/umu/executor.py
 @@ -1,6 +1,7 @@
@@ -393,11 +399,12 @@ index ac5264e..7db4d3e 100644
  import signal
  import subprocess
  import sys
-@@ -15,6 +16,11 @@ from uuid import UUID
+@@ -15,6 +16,12 @@ from uuid import UUID
  from bottles.backend.globals import Paths
  from bottles.backend.managers.sandbox import SandboxManager
  from bottles.backend.umu.models import UmuGame
 +from bottles.backend.umu.display_backend import configure_display_environment
++from bottles.backend.umu.gamescope import resolve_gamescope, wrap_gamescope
 +from bottles.backend.umu.dxvk_override import (
 +    UmuDxvkOverrideError,
 +    configure_dxvk_environment,
@@ -405,7 +412,7 @@ index ac5264e..7db4d3e 100644
  from bottles.backend.umu.processes import prefix_has_process
  from bottles.backend.umu.proton import UmuProtonCatalog
  from bottles.backend.umu.provider import UmuInstallation
-@@ -64,6 +70,13 @@ class UmuWinetricksError(ValueError):
+@@ -64,6 +71,13 @@ class UmuWinetricksError(ValueError):
  
  
  _WINETRICKS_VERB_PATTERN = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_-]*(=[a-zA-Z0-9]*)?$")
@@ -419,7 +426,7 @@ index ac5264e..7db4d3e 100644
  _SESSION_BUS_PREFIX = "unix:path="
  
  
-@@ -135,6 +148,39 @@ class UmuExecutor:
+@@ -135,6 +149,39 @@ class UmuExecutor:
      def _absolute_path(path: Path) -> Path:
          return path.expanduser().resolve(strict=False)
  
@@ -459,7 +466,7 @@ index ac5264e..7db4d3e 100644
      def _sandbox_proton(
          self, game: UmuGame, proton: str
      ) -> tuple[str, tuple[Path, ...]]:
-@@ -251,18 +297,152 @@ class UmuExecutor:
+@@ -251,18 +298,175 @@ class UmuExecutor:
              if game.working_directory
              else None
          )
@@ -468,9 +475,10 @@ index ac5264e..7db4d3e 100644
 +            str(executable),
 +            *game.arguments,
 +        )
+         environment, readable_paths = self._environment(game, prefix_only=False)
 +        backend = game.extra.get("performance_backend", "gamemode")
 +        if backend in ("gamemode", "both"):
-+            gamemoderun = shutil.which("gamemoderun")
++            gamemoderun = shutil.which("gamemoderun", path=environment.get("PATH"))
 +            if gamemoderun:
 +                argv = (gamemoderun, *argv)
 +            else:
@@ -480,12 +488,28 @@ index ac5264e..7db4d3e 100644
 +                    file=sys.stderr,
 +                )
 +
-         environment, readable_paths = self._environment(game, prefix_only=False)
 +        self._configure_sync_environment(game, environment)
++        gamescope = resolve_gamescope(game.extra.get("gamescope"), environment)
++        if gamescope.reason:
++            print(
++                f"Bottles: {gamescope.reason} Launching without Gamescope.",
++                file=sys.stderr,
++            )
 +        display = configure_display_environment(
-+            game.extra.get("display_backend", "proton"), environment
++            game.extra.get("display_backend", "proton"), environment,
++            nested_x11=gamescope.active,
 +        )
-+        if display.fallback:
++        if gamescope.active:
++            print(
++                "Bottles: launching inside Gamescope's XWayland display; "
++                "the saved Display Backend selection applies when Gamescope is off.",
++                file=sys.stderr,
++            )
++            print(
++                f"Bottles: Gamescope options: {shlex.join(gamescope.arguments[1:])}",
++                file=sys.stderr,
++            )
++        elif display.fallback:
 +            fallback = "X11/XWayland" if display.backend == "x11" else "Proton Default"
 +            print(
 +                f"Bottles: {display.reason} Using {fallback} for this launch.",
@@ -543,8 +567,14 @@ index ac5264e..7db4d3e 100644
 +            "no",
 +            "off",
 +        )
-+        if dxvk_selection == "wined3d" and mangohud_enabled:
-+            mangohud = shutil.which("mangohud")
++        if gamescope.active:
++            argv, overlay_reason = wrap_gamescope(
++                gamescope, argv, environment, mangohud_enabled=mangohud_enabled
++            )
++            if overlay_reason:
++                print(f"Bottles: {overlay_reason}", file=sys.stderr)
++        elif dxvk_selection == "wined3d" and mangohud_enabled:
++            mangohud = shutil.which("mangohud", path=environment.get("PATH"))
 +            if mangohud:
 +                # MANGOHUD=1 enables the Vulkan layer only. WineD3D renders
 +                # through OpenGL, which needs MangoHud's preload wrapper.
@@ -617,7 +647,7 @@ index ac5264e..7db4d3e 100644
      def prepare_prefix(self, game: UmuGame) -> UmuCommand:
          environment, readable_paths = self._environment(game, prefix_only=True)
          return UmuCommand(
-@@ -411,6 +591,7 @@ class UmuExecutor:
+@@ -411,6 +615,7 @@ class UmuExecutor:
              )
              tracked = _TrackedProcess(process=process, pgid=process.pid)
              self._processes[game.id] = tracked
@@ -625,19 +655,162 @@ index ac5264e..7db4d3e 100644
              tracked.reader = threading.Thread(
                  target=self._read_output,
                  args=(game, tracked),
+diff --git a/bottles/backend/umu/gamescope.py b/bottles/backend/umu/gamescope.py
+new file mode 100644
+index 0000000..fb939b8
+--- /dev/null
++++ b/bottles/backend/umu/gamescope.py
+@@ -0,0 +1,135 @@
++"""Validated, optional Gamescope commands for UMU; no shell or prefix changes."""
++
++import re
++import shutil
++from collections.abc import Mapping
++from dataclasses import asdict, dataclass
++from gettext import gettext as _
++
++GAMESCOPE_FILTER_IDS = ("linear", "fsr", "nis", "integer", "nearest")
++_RESOLUTION = re.compile(r"\s*([0-9]{1,5})\s*[xX×]\s*([0-9]{1,5})\s*")
++
++
++def parse_resolution(value: object) -> tuple[int, int] | None:
++    if isinstance(value, str):
++        if not value.strip():
++            return None
++        match = _RESOLUTION.fullmatch(value)
++        if match:
++            width, height = map(int, match.groups())
++            if 1 <= width <= 16384 and 1 <= height <= 16384:
++                return width, height
++    raise ValueError(_("Use a resolution such as 1280x720, or leave it empty."))
++
++
++@dataclass(frozen=True)
++class GamescopeSettings:
++    enabled: bool = False
++    game_resolution: str = ""
++    output_resolution: str = ""
++    filter: str = "linear"
++    sharpness: int = 2
++    fps_limit: int = 0
++    fullscreen: bool = True
++
++    @classmethod
++    def from_dict(cls, value: object) -> "GamescopeSettings":
++        if value is None:
++            return cls()
++        if not isinstance(value, Mapping):
++            raise ValueError(_("Invalid Gamescope settings."))
++        settings = cls(
++            **{key: value.get(key, default) for key, default in asdict(cls()).items()}
++        )
++        if type(settings.enabled) is not bool or type(settings.fullscreen) is not bool:
++            raise ValueError(_("Invalid Gamescope switch value."))
++        for resolution in (settings.game_resolution, settings.output_resolution):
++            parse_resolution(resolution)
++        if (
++            not isinstance(settings.filter, str)
++            or settings.filter not in GAMESCOPE_FILTER_IDS
++        ):
++            raise ValueError(_("Invalid Gamescope scaling filter."))
++        if type(settings.sharpness) is not int or not 0 <= settings.sharpness <= 20:
++            raise ValueError(_("Gamescope sharpness must be between 0 and 20."))
++        if type(settings.fps_limit) is not int or not 0 <= settings.fps_limit <= 1000:
++            raise ValueError(_("Gamescope FPS limit must be between 0 and 1000."))
++        return settings
++
++    def to_dict(self) -> dict:
++        values = asdict(self)
++        for key in ("game_resolution", "output_resolution"):
++            resolution = parse_resolution(values[key])
++            values[key] = "{}x{}".format(*resolution) if resolution else ""
++        return values
++
++
++@dataclass(frozen=True)
++class GamescopeLaunch:
++    arguments: tuple[str, ...] = ()
++    reason: str = ""
++
++    @property
++    def active(self) -> bool:
++        return bool(self.arguments)
++
++
++def resolve_gamescope(value: object, environment: Mapping[str, str]) -> GamescopeLaunch:
++    # Legacy games and disabled settings must be exact no-ops, even when
++    # unused settings are malformed. Never infer opt-in from a truthy string.
++    if not isinstance(value, Mapping) or value.get("enabled") is not True:
++        return GamescopeLaunch()
++    try:
++        settings = GamescopeSettings.from_dict(value)
++    except ValueError as error:
++        return GamescopeLaunch(reason=str(error))
++    executable = shutil.which("gamescope", path=environment.get("PATH"))
++    if not executable:
++        return GamescopeLaunch(reason=_("Gamescope is not installed."))
++    if not environment.get("DISPLAY") and not environment.get("WAYLAND_DISPLAY"):
++        return GamescopeLaunch(reason=_("No desktop display is available for Gamescope."))
++
++    arguments = [executable]
++    for resolution, flags in (
++        (settings.game_resolution, ("-w", "-h")),
++        (settings.output_resolution, ("-W", "-H")),
++    ):
++        size = parse_resolution(resolution)
++        if size:
++            arguments.extend((flags[0], str(size[0]), flags[1], str(size[1])))
++    if settings.filter == "integer":
++        arguments.extend(("-S", "integer", "-F", "nearest"))
++    else:
++        arguments.extend(("-F", settings.filter))
++    if settings.filter in ("fsr", "nis"):
++        arguments.extend(("--sharpness", str(settings.sharpness)))
++    if settings.fps_limit:
++        arguments.extend(("-r", str(settings.fps_limit)))
++    if settings.fullscreen:
++        arguments.append("-f")
++    return GamescopeLaunch(tuple(arguments))
++
++
++def wrap_gamescope(
++    launch: GamescopeLaunch,
++    argv: tuple[str, ...],
++    environment: dict[str, str],
++    *,
++    mangohud_enabled: bool,
++) -> tuple[tuple[str, ...], str]:
++    if not launch.active:
++        return argv, ""
++    arguments = launch.arguments
++    reason = ""
++    # Gamescope owns the overlay. Do not load MangoHud into the compositor or
++    # inject its OpenGL wrapper into UMU, regardless of the selected renderer.
++    environment.pop("MANGOHUD", None)
++    if mangohud_enabled:
++        if shutil.which("mangoapp", path=environment.get("PATH")):
++            arguments = (*arguments, "--mangoapp")
++        else:
++            reason = _(
++                "MangoHud is enabled, but mangoapp is missing; install the "
++                "mangohud package for the Gamescope overlay."
++            )
++    return (*arguments, "--", *argv), reason
 diff --git a/bottles/backend/umu/meson.build b/bottles/backend/umu/meson.build
-index 594dc01..6da3a5a 100644
+index 594dc01..1a5632e 100644
 --- a/bottles/backend/umu/meson.build
 +++ b/bottles/backend/umu/meson.build
-@@ -5,6 +5,8 @@ bottles_sources = [
+@@ -5,7 +5,10 @@ bottles_sources = [
    '__init__.py',
    'database.py',
    'dependencies.py',
 +  'display_backend.py',
 +  'dxvk_override.py',
    'executor.py',
++  'gamescope.py',
    'models.py',
    'processes.py',
+   'provider.py',
 diff --git a/bottles/frontend/meson.build b/bottles/frontend/meson.build
 index 6ff7c01..c26ea0b 100644
 --- a/bottles/frontend/meson.build
@@ -656,10 +829,10 @@ index 6ff7c01..c26ea0b 100644
    '__init__.py',
    'main.py',
 diff --git a/bottles/frontend/ui/dialog-umu-game.blp b/bottles/frontend/ui/dialog-umu-game.blp
-index 78adbc1..855d7e1 100644
+index 78adbc1..63c5a45 100644
 --- a/bottles/frontend/ui/dialog-umu-game.blp
 +++ b/bottles/frontend/ui/dialog-umu-game.blp
-@@ -117,6 +117,40 @@ template $UmuGameDialog: Adw.Dialog {
+@@ -117,6 +117,93 @@ template $UmuGameDialog: Adw.Dialog {
        Adw.PreferencesGroup {
          title: _("Launch");
  
@@ -694,6 +867,59 @@ index 78adbc1..855d7e1 100644
 +
 +          Switch switch_mangohud {
 +            valign: center;
++          }
++        }
++
++        Adw.SwitchRow switch_gamescope {
++          title: _("Gamescope");
++          subtitle: _("Run this game in Valve's compositor with optional upscaling and an FPS limit.");
++        }
++
++        Adw.ExpanderRow row_gamescope_options {
++          title: _("Gamescope Options");
++          subtitle: _("Lower game resolutions can improve performance. Set the same resolution in the game if needed.");
++          visible: bind switch_gamescope.active;
++          expanded: true;
++
++          Adw.EntryRow entry_gamescope_game_resolution {
++            title: _("Game Resolution (blank = output)");
++            tooltip-text: _("For example: 1280x720. Width and height must be between 1 and 16384.");
++          }
++
++          Adw.EntryRow entry_gamescope_output_resolution {
++            title: _("Output Resolution (blank = default)");
++            tooltip-text: _("For example: 1920x1080. Leave empty to let Gamescope choose.");
++          }
++
++          Adw.ComboRow combo_gamescope_filter {
++            title: _("Scaling Filter");
++            model: StringList gamescope_filters {};
++          }
++
++          Adw.SpinRow spin_gamescope_sharpness {
++            title: _("Sharpness (0 = sharpest, 20 = softest)");
++            tooltip-text: _("Applies to FSR 1 and NIS upscaling.");
++            adjustment: Adjustment {
++              lower: 0;
++              upper: 20;
++              step-increment: 1;
++              page-increment: 5;
++            };
++          }
++
++          Adw.SpinRow spin_gamescope_fps {
++            title: _("FPS Limit (0 = unlimited)");
++            tooltip-text: _("Some games also require VSync or an in-game FPS limit.");
++            adjustment: Adjustment {
++              lower: 0;
++              upper: 1000;
++              step-increment: 1;
++              page-increment: 10;
++            };
++          }
++
++          Adw.SwitchRow switch_gamescope_fullscreen {
++            title: _("Fullscreen");
 +          }
 +        }
 +
@@ -1045,7 +1271,7 @@ index bc14a8e..40db59a 100644
      # hide() and show() are essentialy workarounds to avoid keeping
      # the empty space of the hidden entry in the GtkFlowBox
 diff --git a/bottles/frontend/windows/umu.py b/bottles/frontend/windows/umu.py
-index 4ec2f72..a42a1cd 100644
+index 4ec2f72..cb0c8a5 100644
 --- a/bottles/frontend/windows/umu.py
 +++ b/bottles/frontend/windows/umu.py
 @@ -14,7 +14,10 @@
@@ -1059,7 +1285,7 @@ index 4ec2f72..a42a1cd 100644
  from concurrent.futures import ThreadPoolExecutor
  from gettext import gettext as _, ngettext
  from pathlib import Path
-@@ -32,6 +35,10 @@ from bottles.backend.umu import (
+@@ -32,6 +35,16 @@ from bottles.backend.umu import (
      UmuPrefix,
      UmuRepositoryError,
  )
@@ -1067,10 +1293,16 @@ index 4ec2f72..a42a1cd 100644
 +    DISPLAY_BACKEND_IDS,
 +    resolve_display_backend,
 +)
++from bottles.backend.umu.gamescope import (
++    GAMESCOPE_FILTER_IDS,
++    GamescopeSettings,
++    parse_resolution,
++    resolve_gamescope,
++)
  from bottles.backend.utils.manager import ManagerUtils
  from bottles.backend.utils.threading import RunAsync
  from bottles.frontend.utils.sh import ShUtils
-@@ -42,6 +49,9 @@ logging = Logger()
+@@ -42,6 +55,9 @@ logging = Logger()
  
  STORE_IDS = UMU_STORE_IDS
  DEPENDENCY_TOOL_IDS = ("bottles", "winetricks")
@@ -1080,7 +1312,7 @@ index 4ec2f72..a42a1cd 100644
  
  
  def _store_labels():
-@@ -59,6 +69,39 @@ def _dependency_tool_labels():
+@@ -59,6 +75,49 @@ def _dependency_tool_labels():
      return (_("Bottles Dependencies"), "Winetricks")
  
  
@@ -1117,10 +1349,20 @@ index 4ec2f72..a42a1cd 100644
 +    )
 +
 +
++def _gamescope_filter_labels():
++    return (
++        _("Linear (Default)"),
++        _("AMD FSR 1"),
++        _("NVIDIA Image Scaling (NIS)"),
++        _("Integer Scaling"),
++        _("Nearest Neighbour"),
++    )
++
++
  def _selected_id(combo, values):
      position = combo.get_selected()
      if position >= len(values):
-@@ -672,6 +715,8 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -672,6 +731,8 @@ class UmuInstallDialog(Adw.Dialog):
      status_error = Gtk.Template.Child()
      row_identity = Gtk.Template.Child()
      row_store = Gtk.Template.Child()
@@ -1129,7 +1371,7 @@ index 4ec2f72..a42a1cd 100644
      row_setup_identity = Gtk.Template.Child()
      row_setup_store = Gtk.Template.Child()
      page_files = Gtk.Template.Child()
-@@ -720,6 +765,9 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -720,6 +781,9 @@ class UmuInstallDialog(Adw.Dialog):
          self._pulse_source = None
          self._stop_requested = False
          self._install_status = None
@@ -1139,7 +1381,7 @@ index 4ec2f72..a42a1cd 100644
  
          self.source_modes.append(_("Run an Installer"))
          self.source_modes.append(_("Use a Portable Executable"))
-@@ -745,6 +793,7 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -745,6 +809,7 @@ class UmuInstallDialog(Adw.Dialog):
              store = _store_title(self.database_entry.store)
          self.row_identity.set_subtitle(identity)
          self.row_store.set_subtitle(store)
@@ -1147,7 +1389,7 @@ index 4ec2f72..a42a1cd 100644
          self.row_setup_identity.set_subtitle(identity)
          self.row_setup_store.set_subtitle(store)
          self.label_proton.set_label(
-@@ -757,6 +806,7 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -757,6 +822,7 @@ class UmuInstallDialog(Adw.Dialog):
          self.btn_executable.connect("clicked", self.__choose_executable)
          self.btn_done.connect("clicked", lambda *_args: self.close())
          self.btn_retry.connect("clicked", self.__retry)
@@ -1155,7 +1397,7 @@ index 4ec2f72..a42a1cd 100644
          self.row_proton.connect("activated", self.__choose_proton)
          self.combo_source.connect("notify::selected", self.__source_changed)
          self.entry_name.connect("changed", self.__update_navigation)
-@@ -870,7 +920,10 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -870,7 +936,10 @@ class UmuInstallDialog(Adw.Dialog):
      def __next(self, *_args):
          page = self.stack.get_visible_child_name()
          if page == "intro":
@@ -1167,7 +1409,7 @@ index 4ec2f72..a42a1cd 100644
          elif page == "installer" and self.installer is not None:
              self.__set_page("setup")
          elif page == "setup":
-@@ -881,6 +934,56 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -881,6 +950,56 @@ class UmuInstallDialog(Adw.Dialog):
          elif page == "executable" and self.executable is not None:
              self.__finish()
  
@@ -1224,7 +1466,7 @@ index 4ec2f72..a42a1cd 100644
      def __choose_source_file(self, *_args):
          def selected(dialog, result):
              try:
-@@ -942,6 +1045,9 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -942,6 +1061,9 @@ class UmuInstallDialog(Adw.Dialog):
          extra = {
              **game.extra,
              "dependency_tool": dependency_tool,
@@ -1234,7 +1476,7 @@ index 4ec2f72..a42a1cd 100644
              "source_mode": "portable" if self.__portable else "installer",
          }
          if not self.__portable:
-@@ -1376,6 +1482,9 @@ class UmuAddGameDialog(Adw.Dialog):
+@@ -1376,6 +1498,9 @@ class UmuAddGameDialog(Adw.Dialog):
          extra = {
              **game.extra,
              "dependency_tool": dependency_tool,
@@ -1244,7 +1486,7 @@ index 4ec2f72..a42a1cd 100644
              "source_mode": "imported" if importing else "installer",
          }
          if not importing:
-@@ -1415,6 +1524,15 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1415,6 +1540,24 @@ class UmuGameDialog(Adw.Dialog):
      entry_game_id = Gtk.Template.Child()
      combo_store = Gtk.Template.Child()
      stores = Gtk.Template.Child()
@@ -1256,11 +1498,20 @@ index 4ec2f72..a42a1cd 100644
 +    sync_backends = Gtk.Template.Child()
 +    combo_display_backend = Gtk.Template.Child()
 +    display_backends = Gtk.Template.Child()
++    row_mangohud = Gtk.Template.Child()
 +    switch_mangohud = Gtk.Template.Child()
++    switch_gamescope = Gtk.Template.Child()
++    entry_gamescope_game_resolution = Gtk.Template.Child()
++    entry_gamescope_output_resolution = Gtk.Template.Child()
++    combo_gamescope_filter = Gtk.Template.Child()
++    gamescope_filters = Gtk.Template.Child()
++    spin_gamescope_sharpness = Gtk.Template.Child()
++    spin_gamescope_fps = Gtk.Template.Child()
++    switch_gamescope_fullscreen = Gtk.Template.Child()
      row_arguments = Gtk.Template.Child()
      row_working_directory = Gtk.Template.Child()
      btn_working_directory = Gtk.Template.Child()
-@@ -1448,6 +1566,16 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1448,6 +1591,31 @@ class UmuGameDialog(Adw.Dialog):
          )
          self.arguments = tuple(game.arguments)
          self.environment = dict(game.environment)
@@ -1270,6 +1521,21 @@ index 4ec2f72..a42a1cd 100644
 +        )
 +        self.dxvk_override_ids = [*DXVK_DEFAULT_IDS]
 +        self.dxvk_override_ids.extend(window.manager.dxvk_available)
++        self._gamescope_install_pending = False
++        try:
++            gamescope = GamescopeSettings.from_dict(game.extra.get("gamescope"))
++        except ValueError as error:
++            logging.warning(f"Invalid saved Gamescope settings: {error}")
++            gamescope = GamescopeSettings()
++        self.switch_gamescope.set_active(gamescope.enabled)
++        self.entry_gamescope_game_resolution.set_text(gamescope.game_resolution)
++        self.entry_gamescope_output_resolution.set_text(gamescope.output_resolution)
++        self.spin_gamescope_sharpness.set_value(gamescope.sharpness)
++        self.spin_gamescope_fps.set_value(gamescope.fps_limit)
++        self.switch_gamescope_fullscreen.set_active(gamescope.fullscreen)
++        for label in _gamescope_filter_labels():
++            self.gamescope_filters.append(label)
++        _select_id(self.combo_gamescope_filter, GAMESCOPE_FILTER_IDS, gamescope.filter)
 +        self.switch_mangohud.set_active(
 +            self.environment.get("MANGOHUD", "").strip().lower()
 +            not in ("", "0", "false", "no", "off")
@@ -1277,7 +1543,7 @@ index 4ec2f72..a42a1cd 100644
          self.switch_sandbox.set_active(game.sandbox)
          self.switch_network.set_active(game.share_net)
          self.installed_dependency_rows = []
-@@ -1456,6 +1584,16 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1456,6 +1624,16 @@ class UmuGameDialog(Adw.Dialog):
              self.stores.append(label)
          for label in _dependency_tool_labels():
              self.dependency_tools.append(label)
@@ -1294,7 +1560,7 @@ index 4ec2f72..a42a1cd 100644
  
          self.entry_name.set_text(game.name)
          self.row_executable.set_subtitle(self.executable)
-@@ -1471,6 +1609,28 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1471,6 +1649,28 @@ class UmuGameDialog(Adw.Dialog):
          )
          self.entry_game_id.set_text(game.game_id)
          _select_id(self.combo_store, STORE_IDS, game.store)
@@ -1319,19 +1585,28 @@ index 4ec2f72..a42a1cd 100644
 +            DISPLAY_BACKEND_IDS,
 +            game.extra.get("display_backend", "proton"),
 +        )
-+        self.__update_display_backend()
++        self.__update_gamescope()
          self.__update_arguments()
          self.__update_environment()
          self.__update_working_directory()
-@@ -1491,6 +1651,7 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1491,6 +1691,16 @@ class UmuGameDialog(Adw.Dialog):
          self.btn_executable.connect("clicked", self.__choose_executable)
          self.btn_prefix.connect("clicked", self.__prefix_action)
          self.btn_proton.connect("clicked", self.__choose_proton)
 +        self.switch_mangohud.connect("notify::active", self.__toggle_mangohud)
++        self.switch_gamescope.connect("notify::active", self.__gamescope_changed)
++        self.combo_gamescope_filter.connect(
++            "notify::selected", lambda *_args: self.__update_gamescope()
++        )
++        for row in (
++            self.entry_gamescope_game_resolution,
++            self.entry_gamescope_output_resolution,
++        ):
++            row.connect("changed", self.__validate_settings)
          self.row_arguments.connect("activated", self.__choose_arguments)
          self.row_environment.connect("activated", self.__choose_environment)
          self.btn_working_directory.connect("clicked", self.__choose_working_directory)
-@@ -1504,6 +1665,12 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1504,6 +1714,12 @@ class UmuGameDialog(Adw.Dialog):
          self.combo_dependency_tool.connect(
              "notify::selected", self.__dependency_tool_changed
          )
@@ -1344,7 +1619,30 @@ index 4ec2f72..a42a1cd 100644
          self.entry_winetricks.connect("changed", self.__dependency_tool_changed)
          self.btn_remove.connect("clicked", self.__confirm_remove)
          self.__validate_settings()
-@@ -1654,6 +1821,46 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1545,10 +1761,20 @@ class UmuGameDialog(Adw.Dialog):
+         self.row_installed_dependencies.set_subtitle(str(count))
+ 
+     def __validate_settings(self, *_args):
+-        rows = (
++        rows = [
+             (self.entry_name, bool(self.entry_name.get_text().strip())),
+             (self.entry_game_id, bool(self.entry_game_id.get_text().strip())),
+-        )
++        ]
++        for row in (
++            self.entry_gamescope_game_resolution,
++            self.entry_gamescope_output_resolution,
++        ):
++            try:
++                parse_resolution(row.get_text())
++                valid = True
++            except ValueError:
++                valid = not self.switch_gamescope.get_active()
++            rows.append((row, valid))
+         executable_valid = bool(self.executable)
+         self.btn_save.set_sensitive(
+             all(valid for _row, valid in rows) and executable_valid
+@@ -1654,6 +1880,58 @@ class UmuGameDialog(Adw.Dialog):
      def __set_proton(self, value, title):
          self.proton = value
          self.label_proton.set_label(title)
@@ -1354,6 +1652,18 @@ index 4ec2f72..a42a1cd 100644
 +        self.__update_display_backend(notify=True)
 +
 +    def __update_display_backend(self, *, notify=False):
++        gamescope = resolve_gamescope(
++            {"enabled": self.switch_gamescope.get_active()},
++            {**os.environ, **self.environment},
++        )
++        self.combo_display_backend.set_sensitive(not gamescope.active)
++        if gamescope.active:
++            self.combo_display_backend.set_subtitle(_(
++                "Gamescope supplies its own XWayland display. Your saved "
++                "selection applies when Gamescope is off. Restart all game "
++                "and launcher processes after changing Gamescope."
++            ))
++            return
 +        # Do not resolve/download an automatic Proton selection just to open
 +        # settings. Launch-time checks use the executor's resolved PROTONPATH.
 +        proton = self.proton
@@ -1391,7 +1701,7 @@ index 4ec2f72..a42a1cd 100644
  
      def __choose_arguments(self, *_args):
          UmuArgumentsDialog(
-@@ -1662,6 +1869,13 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1662,6 +1940,128 @@ class UmuGameDialog(Adw.Dialog):
              self.__set_arguments,
          ).present(self)
  
@@ -1401,11 +1711,126 @@ index 4ec2f72..a42a1cd 100644
 +        else:
 +            self.environment.pop("MANGOHUD", None)
 +        self.__update_environment()
++        self.__update_gamescope()
++        if self.switch_mangohud.get_active():
++            self.__offer_gamescope_install()
++
++    def __gamescope_settings(self):
++        values = {
++            "enabled": self.switch_gamescope.get_active(),
++            "game_resolution": self.entry_gamescope_game_resolution.get_text(),
++            "output_resolution": self.entry_gamescope_output_resolution.get_text(),
++            "filter": _selected_id(self.combo_gamescope_filter, GAMESCOPE_FILTER_IDS),
++            "sharpness": round(self.spin_gamescope_sharpness.get_value()),
++            "fps_limit": round(self.spin_gamescope_fps.get_value()),
++            "fullscreen": self.switch_gamescope_fullscreen.get_active(),
++        }
++        try:
++            return GamescopeSettings.from_dict(values)
++        except ValueError:
++            if values["enabled"]:
++                raise
++            return GamescopeSettings()
++
++    def __gamescope_changed(self, *_args):
++        self.__update_gamescope()
++        self.__offer_gamescope_install()
++
++    def __update_gamescope(self):
++        enabled = self.switch_gamescope.get_active()
++        self.spin_gamescope_sharpness.set_sensitive(
++            _selected_id(self.combo_gamescope_filter, GAMESCOPE_FILTER_IDS)
++            in ("fsr", "nis")
++        )
++        resolution = resolve_gamescope(
++            {"enabled": enabled}, {**os.environ, **self.environment}
++        )
++        subtitle = _(
++            "Run this game in Valve's compositor with optional upscaling "
++            "and an FPS limit. Restart all game and launcher processes."
++        )
++        if enabled and resolution.reason:
++            subtitle = _("{0} Launches normally until Gamescope is available.").format(
++                resolution.reason
++            )
++        self.switch_gamescope.set_subtitle(subtitle)
++        self.row_mangohud.set_subtitle(
++            _("Gamescope uses its mangoapp overlay (provided by mangohud).")
++            if resolution.active else _("Show the performance overlay while this game is running.")
++        )
++        if resolution.active and self.switch_mangohud.get_active() and not shutil.which("mangoapp"):
++            self.row_mangohud.set_subtitle(_(
++                "mangoapp is missing. Install the mangohud package for the Gamescope overlay."
++            ))
++        self.__update_display_backend()
++        self.__validate_settings()
++
++    def __offer_gamescope_install(self):
++        if not self.switch_gamescope.get_active() or self._gamescope_install_pending:
++            return
++        commands = {}
++        if not shutil.which("gamescope"):
++            commands["gamescope"] = "gamescope"
++        if self.switch_mangohud.get_active() and not shutil.which("mangoapp"):
++            commands["mangohud"] = "mangoapp"
++        if not commands:
++            return
++        self._gamescope_install_pending = True
++        dialog = Adw.AlertDialog.new(
++            _("Install Gamescope Support?"),
++            _(
++                "Install these optional system packages: {0}. Gamescope uses "
++                "mangoapp from mangohud for its overlay. Missing Gamescope "
++                "does not prevent the game from launching normally."
++            ).format(", ".join(commands)),
++        )
++        dialog.add_response("cancel", _("Not Now"))
++        dialog.add_response("install", _("Install"))
++        dialog.set_default_response("install")
++        dialog.set_close_response("cancel")
++        dialog.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
++
++        def response(_dialog, response_id):
++            if response_id != "install":
++                self._gamescope_install_pending = False
++                return
++            pkexec, pacman = shutil.which("pkexec"), shutil.which("pacman")
++            if not pkexec or not pacman:
++                self._gamescope_install_pending = False
++                self.window.show_toast(_("Install gamescope and mangohud with your package manager."))
++                return
++            try:
++                process = Gio.Subprocess.new(
++                    [pkexec, pacman, "-S", "--needed", "--noconfirm", *commands],
++                    Gio.SubprocessFlags.NONE,
++                )
++            except GLib.Error as error:
++                self._gamescope_install_pending = False
++                self.window.show_toast(str(error))
++                return
++
++            def installed(proc, result):
++                self._gamescope_install_pending = False
++                try:
++                    success = proc.wait_check_finish(result)
++                except GLib.Error:
++                    success = False
++                available = success and all(shutil.which(command) for command in commands.values())
++                self.__update_gamescope()
++                self.window.show_toast(
++                    _("Gamescope support installed.") if available
++                    else _("Gamescope support was not installed completely.")
++                )
++
++            process.wait_check_async(None, installed)
++
++        dialog.connect("response", response)
++        dialog.present(self)
 +
      def __set_arguments(self, arguments):
          self.arguments = tuple(arguments)
          self.__update_arguments()
-@@ -1671,6 +1885,239 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1671,6 +2071,239 @@ class UmuGameDialog(Adw.Dialog):
              shlex.join(self.arguments) if self.arguments else _("None")
          )
  
@@ -1645,7 +2070,7 @@ index 4ec2f72..a42a1cd 100644
      def __choose_environment(self, *_args):
          UmuEnvironmentDialog(
              self.window,
-@@ -1680,7 +2127,12 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1680,7 +2313,12 @@ class UmuGameDialog(Adw.Dialog):
  
      def __set_environment(self, environment):
          self.environment = dict(environment)
@@ -1654,11 +2079,11 @@ index 4ec2f72..a42a1cd 100644
 +            not in ("", "0", "false", "no", "off")
 +        )
          self.__update_environment()
-+        self.__update_display_backend()
++        self.__update_gamescope()
  
      def __update_environment(self):
          count = len(self.environment)
-@@ -1727,6 +2179,18 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1727,6 +2365,19 @@ class UmuGameDialog(Adw.Dialog):
                  "dependency_tool": _selected_id(
                      self.combo_dependency_tool, DEPENDENCY_TOOL_IDS
                  ),
@@ -1674,6 +2099,7 @@ index 4ec2f72..a42a1cd 100644
 +                "display_backend": _selected_id(
 +                    self.combo_display_backend, DISPLAY_BACKEND_IDS
 +                ),
++                "gamescope": self.__gamescope_settings().to_dict(),
              }
              state = self.game.state
              installer = self.game.extra.get("installer")

@@ -122,6 +122,15 @@ else
   printf '%s\n' '  Feral GameMode: installed'
 fi
 
+if ! pacman -Q gamescope >/dev/null 2>&1; then
+  printf '%s\n' '  Gamescope adds per-game resolution control, optional upscaling, and an FPS limit.'
+  if confirm_install_default_no 'Install optional Gamescope support?'; then
+    sudo pacman -S --needed gamescope
+  fi
+else
+  printf '%s\n' '  Gamescope: installed'
+fi
+
 if ! pacman -Q system76-scheduler >/dev/null 2>&1; then
   printf '%s\n' '  System76 Scheduler is EXPERIMENTAL, persistent, system-wide, and may be unstable on some distributions.'
   if confirm_install_default_no 'Install experimental System76 Scheduler as an additional backend?'; then

@@ -3,7 +3,7 @@
 pkgname=bottles-native-arch
 _pkgname=Bottles
 pkgver=67.4
-pkgrel=11
+pkgrel=12
 epoch=2
 pkgdesc='Latest upstream Bottles, packaged natively for Arch Linux'
 arch=(any)
@@ -52,9 +52,9 @@ makedepends=(
 )
 optdepends=(
   'gamemode: launch games with temporary Feral GameMode optimizations'
-  'gamescope: gamescope session integration'
+  'gamescope: per-game compositor, upscaling, resolution and FPS controls'
   'imagemagick: icon/image conversion'
-  'mangohud: performance overlay'
+  'mangohud: performance overlay, including mangoapp for Gamescope'
   'system76-scheduler: experimental foreground scheduling backend for UMU games'
   'vmtouch: preload bottle files into memory'
   'vulkan-tools: vkcube test and Vulkan information'
@@ -70,9 +70,9 @@ source=(
 )
 sha256sums=(
   'eb417e37851921565664c9dbe2713f94e643f0963d3c6c89afc4cf2bcd7aff3c'
-  '69adf3f9944d66c180fc8f88648519616898c78bd529bcb311715bbae6ef3a9d'
-  'f71525ac8a7b84321a35b3b413123e87f95526bcf8952147cc9c5a9a176edb12'
-  '3eecf5bd1821601124d706ab52355aeed4c701720dd4fd3673b053dea784defb'
+  '63c4c545a98a2567d89222aec5a9ed5536c39b4d7ad7051c621cf76bc66f0bfe'
+  '73d927e370bef906fd10086287348f8d7dd89d01a1cfdf6b20cfaf739f6083ab'
+  '123891cdd3fc73f01d614c0a9d202d5a8057fe3c9e92ab0cbbc5df427c8a1211'
   'df33a555ec11517841667948c8f2702719bd5d3887ee012efd73703661235d2a'
 )
 

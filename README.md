@@ -99,7 +99,7 @@ assignments remain enabled.
 
 ## Native patch scope
 
-UMU-managed games include a per-game MangoHud switch under **Game Settings → Launch**. The switch stores `MANGOHUD=1` in the game environment, so UMU keeps control of the Proton command line. Do not put `mangohud`, `gamemoderun`, or `%command%` in the Arguments field; that field is passed directly to the Windows executable.
+UMU-managed games include a per-game MangoHud switch under **Game Settings → Launch**. The switch stores `MANGOHUD=1` in the game environment, so UMU keeps control of the Proton command line. Do not put `gamescope`, `mangohud`, `gamemoderun`, or `%command%` in the Arguments field; that field is passed directly to the Windows executable.
 
 Managed UMU games also provide a separate per-game DXVK selector. The default
 continues using the DLLs bundled with the selected Proton runner; WineD3D can
@@ -237,6 +237,55 @@ The dependency-free regression suite runs from `verify-source.sh` during
 ```bash
 ./test.sh /path/to/patched/Bottles-67.4
 ```
+
+### Per-game Gamescope
+
+UMU games expose a **Gamescope** switch under **Game Settings → Launch**.
+It starts disabled for existing games. Enabling it reveals controls for:
+
+- **Game Resolution** and **Output Resolution**, such as `1280x720` → `1920x1080`.
+- **Linear**, **AMD FSR 1**, **NIS**, **Integer**, or **Nearest Neighbour** scaling.
+- **Sharpness** for FSR 1/NIS: `0` is sharpest, `20` is softest.
+- **FPS Limit** (`0` leaves it unlimited) and **Fullscreen**.
+
+Blank game resolution follows the output resolution. Blank output resolution
+uses Gamescope's own default; it does not detect your monitor's native resolution.
+For upscaling, set both resolutions explicitly and select the lower resolution
+inside the game if it ignores the advertised display mode. The FPS control uses
+Gamescope's nested refresh setting (`-r`); games that bypass synchronization may
+also need VSync or their own FPS limiter.
+
+Gamescope provides a private XWayland display. While it is active, Bottles
+requests Wine's X11 driver inside that display and suspends the saved **Display
+Backend** override for this launch. The saved selection returns when Gamescope
+is disabled or unavailable. Close all game and launcher processes using the
+prefix before changing this setting.
+
+MangoHud uses Gamescope's **mangoapp** overlay for both DXVK and WineD3D; it is
+not injected into Gamescope or wrapped around UMU on this path. On Arch,
+`mangoapp` is included in the `mangohud` package. Feral GameMode wraps UMU inside
+Gamescope. Synchronization and DXVK settings still apply to the game. Prefix
+creation and Winetricks never run inside Gamescope.
+
+The installer offers Gamescope as an optional dependency. Enabling Gamescope in
+Game Settings also offers to install missing `gamescope`/`mangohud` packages with
+explicit confirmation through Polkit and pacman. Declining keeps the preference
+saved. If Gamescope is missing, no desktop display is available, or saved options
+are invalid, the launch log explains the normal-launch fallback. Missing
+`mangoapp` disables only the overlay for that launch. These checks do not prove
+Vulkan, compositor, or game compatibility; a Gamescope startup failure is logged
+without automatically relaunching the game.
+
+All options are validated and passed as separate command arguments. They never
+become Windows executable arguments or prefix registry changes. Lower rendering
+resolutions may help GPU-bound games; enabling Gamescope at the same resolution
+does not guarantee higher FPS or lower latency. Real GPU/game benchmarking is
+still required, including NIKKE cursor response with WineD3D.
+
+The dependency-free regression suite covers Gamescope options, malformed
+metadata, legacy/off behaviour, missing dependencies, Wayland-only hosts,
+overlay and GameMode composition, prefix operations, metadata persistence, and
+an executable command-chain fixture. Run `./test.sh /path/to/patched/Bottles-67.4`.
 
 #### Tested WineD3D example
 
