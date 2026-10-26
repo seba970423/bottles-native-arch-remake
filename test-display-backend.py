@@ -371,6 +371,23 @@ class GamescopeTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 gamescope.parse_resolution(value)
 
+    def test_existing_resolutions_select_presets_or_preserve_custom_sizes(self):
+        for value in ("", *gamescope.GAMESCOPE_RESOLUTION_PRESETS, "1500x900", "2400×1350"):
+            with self.subTest(value=value):
+                preset = gamescope.resolution_preset(value)
+                restored = gamescope.resolution_from_preset(preset, value)
+                self.assertEqual(restored, value.replace("×", "x"))
+                self.assertEqual(preset == "custom", value in ("1500x900", "2400×1350"))
+        self.assertEqual(gamescope.resolution_preset(" 1280 X 720 "), "1280x720")
+
+    def test_preset_ignores_hidden_custom_text_but_custom_requires_a_valid_size(self):
+        self.assertEqual(gamescope.resolution_from_preset("1280x720", "invalid"), "1280x720")
+        self.assertEqual(gamescope.resolution_from_preset("", "invalid"), "")
+        for preset, value in (("custom", ""), ("custom", "invalid"), ("--help", ""),
+                               (None, ""), ([], "")):
+            with self.subTest(preset=preset, value=value), self.assertRaises(ValueError):
+                gamescope.resolution_from_preset(preset, value)
+
     def test_malformed_enabled_settings_fall_back_without_mutation(self):
         for key, value in (("game_resolution", []), ("output_resolution", "bad"),
                            ("filter", []), ("filter", "--help"), ("sharpness", True),

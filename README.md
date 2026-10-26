@@ -243,13 +243,17 @@ The dependency-free regression suite runs from `verify-source.sh` during
 UMU games expose a **Gamescope** switch under **Game Settings → Launch**.
 It starts disabled for existing games. Enabling it reveals controls for:
 
-- **Game Resolution** and **Output Resolution**, such as `1280x720` → `1920x1080`.
+- Searchable **Game Resolution** and **Output Resolution** dropdowns with common
+  presets from `640x480` to `7680x4320`, including 720p, 1080p, 1440p, 4K and
+  ultrawide modes. Select **Custom…** only when you need another size.
 - **Linear**, **AMD FSR 1**, **NIS**, **Integer**, or **Nearest Neighbour** scaling.
 - **Sharpness** for FSR 1/NIS: `0` is sharpest, `20` is softest.
 - **FPS Limit** (`0` leaves it unlimited) and **Fullscreen**.
 
-Blank game resolution follows the output resolution. Blank output resolution
-uses Gamescope's own default; it does not detect your monitor's native resolution.
+**Match Output (Default)** renders at the output resolution. **Gamescope Default**
+uses Gamescope's own output default; it does not detect your monitor's native resolution.
+Existing saved resolutions select the matching preset automatically; other saved
+sizes remain available under **Custom…**, with their values preserved.
 For upscaling, set both resolutions explicitly and select the lower resolution
 inside the game if it ignores the advertised display mode. The FPS control uses
 Gamescope's nested refresh setting (`-r`); games that bypass synchronization may

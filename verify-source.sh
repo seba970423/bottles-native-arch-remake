@@ -32,6 +32,9 @@ for feature in \
   "${umu_game_blueprint}:switch_gamescope" \
   "${umu_game_blueprint}:entry_gamescope_game_resolution" \
   "${umu_game_blueprint}:entry_gamescope_output_resolution" \
+  "${umu_game_blueprint}:combo_gamescope_game_resolution" \
+  "${umu_game_blueprint}:combo_gamescope_output_resolution" \
+  "${umu_dialog}:def __gamescope_resolution_changed" \
   "${umu_game_blueprint}:combo_gamescope_filter" \
   "${umu_game_blueprint}:spin_gamescope_fps" \
   "${umu_dialog}:def __gamescope_settings" \

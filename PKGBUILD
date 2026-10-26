@@ -3,7 +3,7 @@
 pkgname=bottles-native-arch
 _pkgname=Bottles
 pkgver=67.4
-pkgrel=12
+pkgrel=13
 epoch=2
 pkgdesc='Latest upstream Bottles, packaged natively for Arch Linux'
 arch=(any)
@@ -70,9 +70,9 @@ source=(
 )
 sha256sums=(
   'eb417e37851921565664c9dbe2713f94e643f0963d3c6c89afc4cf2bcd7aff3c'
-  '63c4c545a98a2567d89222aec5a9ed5536c39b4d7ad7051c621cf76bc66f0bfe'
-  '73d927e370bef906fd10086287348f8d7dd89d01a1cfdf6b20cfaf739f6083ab'
-  '123891cdd3fc73f01d614c0a9d202d5a8057fe3c9e92ab0cbbc5df427c8a1211'
+  'c9a4793e8699099ce836dbacf7c653c527fea305fc12637f52b9287953121aec'
+  '744d09e239923e5d7cb1ceb5f90359e3c5fbefaffa9165aee8c66c4e1f777d1e'
+  'cb6c8393d42af7f36cf9b37a3de845d73ce76af1ec46eaa7ed6f5c19a9745d7c'
   'df33a555ec11517841667948c8f2702719bd5d3887ee012efd73703661235d2a'
 )
 

@@ -657,10 +657,10 @@ index ac5264e..af7ac86 100644
                  args=(game, tracked),
 diff --git a/bottles/backend/umu/gamescope.py b/bottles/backend/umu/gamescope.py
 new file mode 100644
-index 0000000..fb939b8
+index 0000000..66bdf2b
 --- /dev/null
 +++ b/bottles/backend/umu/gamescope.py
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,160 @@
 +"""Validated, optional Gamescope commands for UMU; no shell or prefix changes."""
 +
 +import re
@@ -670,6 +670,13 @@ index 0000000..fb939b8
 +from gettext import gettext as _
 +
 +GAMESCOPE_FILTER_IDS = ("linear", "fsr", "nis", "integer", "nearest")
++GAMESCOPE_RESOLUTION_PRESETS = (
++    "640x480", "800x600", "1024x768", "1280x720", "1280x800", "1280x1024",
++    "1366x768", "1440x900", "1600x900", "1680x1050", "1920x1080", "1920x1200",
++    "2560x1080", "2560x1440", "2560x1600", "3440x1440", "3840x2160",
++    "5120x1440", "7680x4320",
++)
++GAMESCOPE_RESOLUTION_IDS = ("", *GAMESCOPE_RESOLUTION_PRESETS, "custom")
 +_RESOLUTION = re.compile(r"\s*([0-9]{1,5})\s*[xX×]\s*([0-9]{1,5})\s*")
 +
 +
@@ -683,6 +690,24 @@ index 0000000..fb939b8
 +            if 1 <= width <= 16384 and 1 <= height <= 16384:
 +                return width, height
 +    raise ValueError(_("Use a resolution such as 1280x720, or leave it empty."))
++
++
++def resolution_preset(value: object) -> str:
++    """Map an existing resolution to a dropdown without discarding custom sizes."""
++    size = parse_resolution(value)
++    resolution = "{}x{}".format(*size) if size else ""
++    return resolution if resolution in GAMESCOPE_RESOLUTION_IDS else "custom"
++
++
++def resolution_from_preset(preset: object, custom: object = "") -> str:
++    if preset == "custom":
++        size = parse_resolution(custom)
++        if size is None:
++            raise ValueError(_("Enter a custom resolution such as 1280x720."))
++        return "{}x{}".format(*size)
++    if isinstance(preset, str) and preset in GAMESCOPE_RESOLUTION_IDS:
++        return preset
++    raise ValueError(_("Select a valid Gamescope resolution."))
 +
 +
 +@dataclass(frozen=True)
@@ -829,10 +854,10 @@ index 6ff7c01..c26ea0b 100644
    '__init__.py',
    'main.py',
 diff --git a/bottles/frontend/ui/dialog-umu-game.blp b/bottles/frontend/ui/dialog-umu-game.blp
-index 78adbc1..63c5a45 100644
+index 78adbc1..d8d0916 100644
 --- a/bottles/frontend/ui/dialog-umu-game.blp
 +++ b/bottles/frontend/ui/dialog-umu-game.blp
-@@ -117,6 +117,93 @@ template $UmuGameDialog: Adw.Dialog {
+@@ -117,6 +117,109 @@ template $UmuGameDialog: Adw.Dialog {
        Adw.PreferencesGroup {
          title: _("Launch");
  
@@ -881,14 +906,30 @@ index 78adbc1..63c5a45 100644
 +          visible: bind switch_gamescope.active;
 +          expanded: true;
 +
++          Adw.ComboRow combo_gamescope_game_resolution {
++            title: _("Game Resolution");
++            subtitle: _("Resolution the game renders at.");
++            enable-search: true;
++            model: StringList gamescope_game_resolutions {};
++          }
++
 +          Adw.EntryRow entry_gamescope_game_resolution {
-+            title: _("Game Resolution (blank = output)");
++            title: _("Custom Game Resolution");
++            visible: false;
 +            tooltip-text: _("For example: 1280x720. Width and height must be between 1 and 16384.");
 +          }
 +
++          Adw.ComboRow combo_gamescope_output_resolution {
++            title: _("Output Resolution");
++            subtitle: _("Resolution of the Gamescope window. Choose your screen's resolution for upscaling.");
++            enable-search: true;
++            model: StringList gamescope_output_resolutions {};
++          }
++
 +          Adw.EntryRow entry_gamescope_output_resolution {
-+            title: _("Output Resolution (blank = default)");
-+            tooltip-text: _("For example: 1920x1080. Leave empty to let Gamescope choose.");
++            title: _("Custom Output Resolution");
++            visible: false;
++            tooltip-text: _("For example: 1920x1080. Width and height must be between 1 and 16384.");
 +          }
 +
 +          Adw.ComboRow combo_gamescope_filter {
@@ -1271,7 +1312,7 @@ index bc14a8e..40db59a 100644
      # hide() and show() are essentialy workarounds to avoid keeping
      # the empty space of the hidden entry in the GtkFlowBox
 diff --git a/bottles/frontend/windows/umu.py b/bottles/frontend/windows/umu.py
-index 4ec2f72..cb0c8a5 100644
+index 4ec2f72..d7bd007 100644
 --- a/bottles/frontend/windows/umu.py
 +++ b/bottles/frontend/windows/umu.py
 @@ -14,7 +14,10 @@
@@ -1285,7 +1326,7 @@ index 4ec2f72..cb0c8a5 100644
  from concurrent.futures import ThreadPoolExecutor
  from gettext import gettext as _, ngettext
  from pathlib import Path
-@@ -32,6 +35,16 @@ from bottles.backend.umu import (
+@@ -32,6 +35,18 @@ from bottles.backend.umu import (
      UmuPrefix,
      UmuRepositoryError,
  )
@@ -1295,14 +1336,16 @@ index 4ec2f72..cb0c8a5 100644
 +)
 +from bottles.backend.umu.gamescope import (
 +    GAMESCOPE_FILTER_IDS,
++    GAMESCOPE_RESOLUTION_IDS,
 +    GamescopeSettings,
-+    parse_resolution,
++    resolution_from_preset,
++    resolution_preset,
 +    resolve_gamescope,
 +)
  from bottles.backend.utils.manager import ManagerUtils
  from bottles.backend.utils.threading import RunAsync
  from bottles.frontend.utils.sh import ShUtils
-@@ -42,6 +55,9 @@ logging = Logger()
+@@ -42,6 +57,9 @@ logging = Logger()
  
  STORE_IDS = UMU_STORE_IDS
  DEPENDENCY_TOOL_IDS = ("bottles", "winetricks")
@@ -1312,7 +1355,7 @@ index 4ec2f72..cb0c8a5 100644
  
  
  def _store_labels():
-@@ -59,6 +75,49 @@ def _dependency_tool_labels():
+@@ -59,6 +77,49 @@ def _dependency_tool_labels():
      return (_("Bottles Dependencies"), "Winetricks")
  
  
@@ -1362,7 +1405,7 @@ index 4ec2f72..cb0c8a5 100644
  def _selected_id(combo, values):
      position = combo.get_selected()
      if position >= len(values):
-@@ -672,6 +731,8 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -672,6 +733,8 @@ class UmuInstallDialog(Adw.Dialog):
      status_error = Gtk.Template.Child()
      row_identity = Gtk.Template.Child()
      row_store = Gtk.Template.Child()
@@ -1371,7 +1414,7 @@ index 4ec2f72..cb0c8a5 100644
      row_setup_identity = Gtk.Template.Child()
      row_setup_store = Gtk.Template.Child()
      page_files = Gtk.Template.Child()
-@@ -720,6 +781,9 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -720,6 +783,9 @@ class UmuInstallDialog(Adw.Dialog):
          self._pulse_source = None
          self._stop_requested = False
          self._install_status = None
@@ -1381,7 +1424,7 @@ index 4ec2f72..cb0c8a5 100644
  
          self.source_modes.append(_("Run an Installer"))
          self.source_modes.append(_("Use a Portable Executable"))
-@@ -745,6 +809,7 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -745,6 +811,7 @@ class UmuInstallDialog(Adw.Dialog):
              store = _store_title(self.database_entry.store)
          self.row_identity.set_subtitle(identity)
          self.row_store.set_subtitle(store)
@@ -1389,7 +1432,7 @@ index 4ec2f72..cb0c8a5 100644
          self.row_setup_identity.set_subtitle(identity)
          self.row_setup_store.set_subtitle(store)
          self.label_proton.set_label(
-@@ -757,6 +822,7 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -757,6 +824,7 @@ class UmuInstallDialog(Adw.Dialog):
          self.btn_executable.connect("clicked", self.__choose_executable)
          self.btn_done.connect("clicked", lambda *_args: self.close())
          self.btn_retry.connect("clicked", self.__retry)
@@ -1397,7 +1440,7 @@ index 4ec2f72..cb0c8a5 100644
          self.row_proton.connect("activated", self.__choose_proton)
          self.combo_source.connect("notify::selected", self.__source_changed)
          self.entry_name.connect("changed", self.__update_navigation)
-@@ -870,7 +936,10 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -870,7 +938,10 @@ class UmuInstallDialog(Adw.Dialog):
      def __next(self, *_args):
          page = self.stack.get_visible_child_name()
          if page == "intro":
@@ -1409,7 +1452,7 @@ index 4ec2f72..cb0c8a5 100644
          elif page == "installer" and self.installer is not None:
              self.__set_page("setup")
          elif page == "setup":
-@@ -881,6 +950,56 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -881,6 +952,56 @@ class UmuInstallDialog(Adw.Dialog):
          elif page == "executable" and self.executable is not None:
              self.__finish()
  
@@ -1466,7 +1509,7 @@ index 4ec2f72..cb0c8a5 100644
      def __choose_source_file(self, *_args):
          def selected(dialog, result):
              try:
-@@ -942,6 +1061,9 @@ class UmuInstallDialog(Adw.Dialog):
+@@ -942,6 +1063,9 @@ class UmuInstallDialog(Adw.Dialog):
          extra = {
              **game.extra,
              "dependency_tool": dependency_tool,
@@ -1476,7 +1519,7 @@ index 4ec2f72..cb0c8a5 100644
              "source_mode": "portable" if self.__portable else "installer",
          }
          if not self.__portable:
-@@ -1376,6 +1498,9 @@ class UmuAddGameDialog(Adw.Dialog):
+@@ -1376,6 +1500,9 @@ class UmuAddGameDialog(Adw.Dialog):
          extra = {
              **game.extra,
              "dependency_tool": dependency_tool,
@@ -1486,7 +1529,7 @@ index 4ec2f72..cb0c8a5 100644
              "source_mode": "imported" if importing else "installer",
          }
          if not importing:
-@@ -1415,6 +1540,24 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1415,6 +1542,28 @@ class UmuGameDialog(Adw.Dialog):
      entry_game_id = Gtk.Template.Child()
      combo_store = Gtk.Template.Child()
      stores = Gtk.Template.Child()
@@ -1501,7 +1544,11 @@ index 4ec2f72..cb0c8a5 100644
 +    row_mangohud = Gtk.Template.Child()
 +    switch_mangohud = Gtk.Template.Child()
 +    switch_gamescope = Gtk.Template.Child()
++    combo_gamescope_game_resolution = Gtk.Template.Child()
++    gamescope_game_resolutions = Gtk.Template.Child()
 +    entry_gamescope_game_resolution = Gtk.Template.Child()
++    combo_gamescope_output_resolution = Gtk.Template.Child()
++    gamescope_output_resolutions = Gtk.Template.Child()
 +    entry_gamescope_output_resolution = Gtk.Template.Child()
 +    combo_gamescope_filter = Gtk.Template.Child()
 +    gamescope_filters = Gtk.Template.Child()
@@ -1511,7 +1558,7 @@ index 4ec2f72..cb0c8a5 100644
      row_arguments = Gtk.Template.Child()
      row_working_directory = Gtk.Template.Child()
      btn_working_directory = Gtk.Template.Child()
-@@ -1448,6 +1591,31 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1448,6 +1597,48 @@ class UmuGameDialog(Adw.Dialog):
          )
          self.arguments = tuple(game.arguments)
          self.environment = dict(game.environment)
@@ -1528,6 +1575,23 @@ index 4ec2f72..cb0c8a5 100644
 +            logging.warning(f"Invalid saved Gamescope settings: {error}")
 +            gamescope = GamescopeSettings()
 +        self.switch_gamescope.set_active(gamescope.enabled)
++        for value in GAMESCOPE_RESOLUTION_IDS:
++            if value == "":
++                game_label, output_label = _("Match Output (Default)"), _("Gamescope Default")
++            elif value == "custom":
++                game_label = output_label = _("Custom…")
++            else:
++                game_label = output_label = value.replace("x", " × ")
++            self.gamescope_game_resolutions.append(game_label)
++            self.gamescope_output_resolutions.append(output_label)
++        _select_id(
++            self.combo_gamescope_game_resolution, GAMESCOPE_RESOLUTION_IDS,
++            resolution_preset(gamescope.game_resolution),
++        )
++        _select_id(
++            self.combo_gamescope_output_resolution, GAMESCOPE_RESOLUTION_IDS,
++            resolution_preset(gamescope.output_resolution),
++        )
 +        self.entry_gamescope_game_resolution.set_text(gamescope.game_resolution)
 +        self.entry_gamescope_output_resolution.set_text(gamescope.output_resolution)
 +        self.spin_gamescope_sharpness.set_value(gamescope.sharpness)
@@ -1543,7 +1607,7 @@ index 4ec2f72..cb0c8a5 100644
          self.switch_sandbox.set_active(game.sandbox)
          self.switch_network.set_active(game.share_net)
          self.installed_dependency_rows = []
-@@ -1456,6 +1624,16 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1456,6 +1647,16 @@ class UmuGameDialog(Adw.Dialog):
              self.stores.append(label)
          for label in _dependency_tool_labels():
              self.dependency_tools.append(label)
@@ -1560,7 +1624,7 @@ index 4ec2f72..cb0c8a5 100644
  
          self.entry_name.set_text(game.name)
          self.row_executable.set_subtitle(self.executable)
-@@ -1471,6 +1649,28 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1471,6 +1672,28 @@ class UmuGameDialog(Adw.Dialog):
          )
          self.entry_game_id.set_text(game.game_id)
          _select_id(self.combo_store, STORE_IDS, game.store)
@@ -1589,7 +1653,7 @@ index 4ec2f72..cb0c8a5 100644
          self.__update_arguments()
          self.__update_environment()
          self.__update_working_directory()
-@@ -1491,6 +1691,16 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1491,6 +1714,21 @@ class UmuGameDialog(Adw.Dialog):
          self.btn_executable.connect("clicked", self.__choose_executable)
          self.btn_prefix.connect("clicked", self.__prefix_action)
          self.btn_proton.connect("clicked", self.__choose_proton)
@@ -1603,10 +1667,15 @@ index 4ec2f72..cb0c8a5 100644
 +            self.entry_gamescope_output_resolution,
 +        ):
 +            row.connect("changed", self.__validate_settings)
++        for combo in (
++            self.combo_gamescope_game_resolution,
++            self.combo_gamescope_output_resolution,
++        ):
++            combo.connect("notify::selected", self.__gamescope_resolution_changed)
          self.row_arguments.connect("activated", self.__choose_arguments)
          self.row_environment.connect("activated", self.__choose_environment)
          self.btn_working_directory.connect("clicked", self.__choose_working_directory)
-@@ -1504,6 +1714,12 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1504,6 +1742,12 @@ class UmuGameDialog(Adw.Dialog):
          self.combo_dependency_tool.connect(
              "notify::selected", self.__dependency_tool_changed
          )
@@ -1619,7 +1688,7 @@ index 4ec2f72..cb0c8a5 100644
          self.entry_winetricks.connect("changed", self.__dependency_tool_changed)
          self.btn_remove.connect("clicked", self.__confirm_remove)
          self.__validate_settings()
-@@ -1545,10 +1761,20 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1545,10 +1789,22 @@ class UmuGameDialog(Adw.Dialog):
          self.row_installed_dependencies.set_subtitle(str(count))
  
      def __validate_settings(self, *_args):
@@ -1629,12 +1698,14 @@ index 4ec2f72..cb0c8a5 100644
              (self.entry_game_id, bool(self.entry_game_id.get_text().strip())),
 -        )
 +        ]
-+        for row in (
-+            self.entry_gamescope_game_resolution,
-+            self.entry_gamescope_output_resolution,
++        for combo, row in (
++            (self.combo_gamescope_game_resolution, self.entry_gamescope_game_resolution),
++            (self.combo_gamescope_output_resolution, self.entry_gamescope_output_resolution),
 +        ):
 +            try:
-+                parse_resolution(row.get_text())
++                resolution_from_preset(
++                    _selected_id(combo, GAMESCOPE_RESOLUTION_IDS), row.get_text()
++                )
 +                valid = True
 +            except ValueError:
 +                valid = not self.switch_gamescope.get_active()
@@ -1642,7 +1713,7 @@ index 4ec2f72..cb0c8a5 100644
          executable_valid = bool(self.executable)
          self.btn_save.set_sensitive(
              all(valid for _row, valid in rows) and executable_valid
-@@ -1654,6 +1880,58 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1654,6 +1910,58 @@ class UmuGameDialog(Adw.Dialog):
      def __set_proton(self, value, title):
          self.proton = value
          self.label_proton.set_label(title)
@@ -1701,7 +1772,7 @@ index 4ec2f72..cb0c8a5 100644
  
      def __choose_arguments(self, *_args):
          UmuArgumentsDialog(
-@@ -1662,6 +1940,128 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1662,6 +1970,146 @@ class UmuGameDialog(Adw.Dialog):
              self.__set_arguments,
          ).present(self)
  
@@ -1716,27 +1787,45 @@ index 4ec2f72..cb0c8a5 100644
 +            self.__offer_gamescope_install()
 +
 +    def __gamescope_settings(self):
-+        values = {
-+            "enabled": self.switch_gamescope.get_active(),
-+            "game_resolution": self.entry_gamescope_game_resolution.get_text(),
-+            "output_resolution": self.entry_gamescope_output_resolution.get_text(),
-+            "filter": _selected_id(self.combo_gamescope_filter, GAMESCOPE_FILTER_IDS),
-+            "sharpness": round(self.spin_gamescope_sharpness.get_value()),
-+            "fps_limit": round(self.spin_gamescope_fps.get_value()),
-+            "fullscreen": self.switch_gamescope_fullscreen.get_active(),
-+        }
 +        try:
++            values = {
++                "enabled": self.switch_gamescope.get_active(),
++                "game_resolution": resolution_from_preset(
++                    _selected_id(self.combo_gamescope_game_resolution, GAMESCOPE_RESOLUTION_IDS),
++                    self.entry_gamescope_game_resolution.get_text(),
++                ),
++                "output_resolution": resolution_from_preset(
++                    _selected_id(self.combo_gamescope_output_resolution, GAMESCOPE_RESOLUTION_IDS),
++                    self.entry_gamescope_output_resolution.get_text(),
++                ),
++                "filter": _selected_id(self.combo_gamescope_filter, GAMESCOPE_FILTER_IDS),
++                "sharpness": round(self.spin_gamescope_sharpness.get_value()),
++                "fps_limit": round(self.spin_gamescope_fps.get_value()),
++                "fullscreen": self.switch_gamescope_fullscreen.get_active(),
++            }
 +            return GamescopeSettings.from_dict(values)
 +        except ValueError:
-+            if values["enabled"]:
++            if self.switch_gamescope.get_active():
 +                raise
 +            return GamescopeSettings()
++
++    def __gamescope_resolution_changed(self, *_args):
++        for combo, row in (
++            (self.combo_gamescope_game_resolution, self.entry_gamescope_game_resolution),
++            (self.combo_gamescope_output_resolution, self.entry_gamescope_output_resolution),
++        ):
++            preset = _selected_id(combo, GAMESCOPE_RESOLUTION_IDS)
++            row.set_visible(preset == "custom")
++            if preset and preset != "custom":
++                row.set_text(preset)
++        self.__validate_settings()
 +
 +    def __gamescope_changed(self, *_args):
 +        self.__update_gamescope()
 +        self.__offer_gamescope_install()
 +
 +    def __update_gamescope(self):
++        self.__gamescope_resolution_changed()
 +        enabled = self.switch_gamescope.get_active()
 +        self.spin_gamescope_sharpness.set_sensitive(
 +            _selected_id(self.combo_gamescope_filter, GAMESCOPE_FILTER_IDS)
@@ -1830,7 +1919,7 @@ index 4ec2f72..cb0c8a5 100644
      def __set_arguments(self, arguments):
          self.arguments = tuple(arguments)
          self.__update_arguments()
-@@ -1671,6 +2071,239 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1671,6 +2119,239 @@ class UmuGameDialog(Adw.Dialog):
              shlex.join(self.arguments) if self.arguments else _("None")
          )
  
@@ -2070,7 +2159,7 @@ index 4ec2f72..cb0c8a5 100644
      def __choose_environment(self, *_args):
          UmuEnvironmentDialog(
              self.window,
-@@ -1680,7 +2313,12 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1680,7 +2361,12 @@ class UmuGameDialog(Adw.Dialog):
  
      def __set_environment(self, environment):
          self.environment = dict(environment)
@@ -2083,7 +2172,7 @@ index 4ec2f72..cb0c8a5 100644
  
      def __update_environment(self):
          count = len(self.environment)
-@@ -1727,6 +2365,19 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1727,6 +2413,19 @@ class UmuGameDialog(Adw.Dialog):
                  "dependency_tool": _selected_id(
                      self.combo_dependency_tool, DEPENDENCY_TOOL_IDS
                  ),
