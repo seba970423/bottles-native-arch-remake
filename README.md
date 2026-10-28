@@ -128,63 +128,29 @@ Bottle data can remain in the default location or be placed on secondary
 storage. This package does not replace those paths with symlinks or bypass
 pacman's ownership database.
 
-### Per-game D7VK, DXVK and VKD3D selection
+### Per-game DXVK and WineD3D selection
 
-Managed UMU games expose three graphics component dropdowns under
-**Game Settings → Graphics → Component Version Overrides**, independently of
-the selected Proton runner:
+Managed UMU games expose a separate graphics-translation selector under
+**Game Settings → Launch**. This setting is independent of the selected Proton
+runner.
 
-| Selector | Direct3D APIs | Choices |
-| --- | --- | --- |
-| D7VK | Direct3D 3–7 | Proton Default, installed D7VK versions |
-| DXVK | Direct3D 8–11 | Proton Default, WineD3D, installed DXVK versions |
-| VKD3D | Direct3D 12 | Proton Default, installed VKD3D versions |
+Available modes:
 
-Install versions in **Preferences → DLL Components**, then reopen Game
-Settings to select them. **Proton Default** retains the runner's own behavior
-and is the default for existing games. Selecting a component affects games
-using its Direct3D API; enabling D7VK or changing VKD3D does not accelerate a
-Direct3D 11 game.
-
-The component dropdowns configure versions; they do not indicate the active
-renderer. They are grouped under an expander and labeled by Direct3D API.
-**Graphics Startup Reports** shows messages observed in the current or last
-launch during this Bottles session. Run the game and use Refresh to update it;
-the information button shows the source messages. Each new launch clears its
-previous reports. No renderer is inferred from the selected versions.
-
-Startup reports can include launcher activity or failed initialization, and
-components with suppressed or unrecognized output may be absent. They do not
-prove which library is drawing the game's frames. DXVK can provide shared DXGI
-alongside VKD3D in a Direct3D 12 game, so observing both is valid.
-
-**WineD3D** uses Wine's OpenGL translation instead of DXVK. Proton's
-`PROTON_USE_WINED3D` switch also disables its VKD3D setup, so the VKD3D selector
-is unavailable while WineD3D is selected. Its saved selection is retained for
-when DXVK is restored. D7VK remains independently selectable.
+- **Bundled with selected Proton** — uses the DXVK version supplied by Proton
+  and remains the recommended default.
+- **Installed DXVK version** — replaces only the managed prefix's D3D8–11 DLLs
+  while keeping the selected Proton runner and VKD3D.
+- **WineD3D** — disables DXVK for D3D8–11 and uses Wine's OpenGL translation
+  layer instead. VKD3D remains available for Direct3D 12.
 
 WineD3D may provide better compatibility, input latency, or frame pacing in
 some games, but it may perform worse in others. Results depend on the game,
 graphics driver, and hardware.
 
-Proton refreshes DXVK and VKD3D DLLs on each launch. To preserve the selection,
-Bottles prepares a private tool in the UMU data folder: it copies the selected
-component DLLs and runner control files, sharing the rest of the runner through
-links. It does not modify the installed Proton tool. Returning to Proton
-Default uses the original tool, which restores its bundled DLLs on launch.
-Legacy prefix-only DXVK backups are restored automatically during migration.
-Both modern and classic Proton library layouts are supported, along with
-UMU's downloaded automatic channels. If a component or compatible installed
-runner is unavailable, Bottles logs the reason and uses Proton's component.
-
-D7VK uses its 32-bit `ddraw.dll` and preserves a copy of the selected runner's
-Wine DirectDraw as `ddraw_.dll`. Both prefix files are backed up transactionally,
-including regular files, symbolic links, and missing files. Returning to
-Proton Default restores the original state, and failed replacements roll back.
-Component overrides are restricted to managed UMU prefixes; imported prefixes
-are left untouched. Stop all game and launcher processes before changing
-graphics components. Versions selected by a UMU game cannot be removed from
-DLL Components until that game uses another version or Proton Default.
+Before applying a custom DXVK version, Bottles records the original DLL state,
+including regular files, symbolic links, and missing files. Switching back to
+the bundled Proton option restores that state. A failed or incomplete
+replacement triggers automatic rollback.
 
 When MangoHud is enabled with WineD3D, Bottles automatically uses MangoHud's
 OpenGL preload wrapper. This allows the overlay to appear in the game without
