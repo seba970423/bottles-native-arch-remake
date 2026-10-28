@@ -37,6 +37,19 @@ models = load_module("native_models_test", "bottles/backend/umu/models.py")
 gamescope = load_module("native_gamescope_test", "bottles/backend/umu/gamescope.py")
 
 
+def load_graphics(root):
+    namespace = {"UmuGame": models.UmuGame, "Paths": SimpleNamespace(
+        **{kind: root / kind for kind in ("d7vk", "dxvk", "vkd3d")}
+    )}
+    for name in ("dxvk_override", "graphics"):
+        tree = ast.parse((SOURCE_ROOT / f"bottles/backend/umu/{name}.py").read_text())
+        tree.body = [node for node in tree.body if not (
+            isinstance(node, ast.ImportFrom) and (node.module or "").startswith("bottles.")
+        )]
+        exec(compile(tree, f"{name}.py", "exec"), namespace)
+    return SimpleNamespace(**namespace)
+
+
 def make_executor(root, environment):
     # Execute the actual executor classes while stubbing only unavailable
     # GI/application imports. No production launch logic is reimplemented.
@@ -57,14 +70,9 @@ def make_executor(root, environment):
         "resolve_gamescope": gamescope.resolve_gamescope,
         "wrap_gamescope": gamescope.wrap_gamescope,
     }
-    dxvk_tree = ast.parse((SOURCE_ROOT / "bottles/backend/umu/dxvk_override.py").read_text())
-    dxvk_tree.body = [node for node in dxvk_tree.body if not (
-        isinstance(node, ast.ImportFrom) and (node.module or "").startswith("bottles.")
-    )]
-    dxvk_namespace = {"UmuGame": models.UmuGame, "Paths": SimpleNamespace(dxvk=root / "dxvk")}
-    exec(compile(dxvk_tree, "dxvk_override.py", "exec"), dxvk_namespace)
-    for key in ("configure_dxvk_environment", "UmuDxvkOverrideError"):
-        namespace[key] = dxvk_namespace[key]
+    graphics = load_graphics(root)
+    for key in ("configure_graphics_environment", "custom_graphics_requested", "UmuDxvkOverrideError"):
+        namespace[key] = getattr(graphics, key)
     exec(compile(module, "executor.py", "exec"), namespace)
     return namespace["UmuExecutor"](
         installation_type(path=root / "umu-run"), data_root=root / "data",
@@ -310,6 +318,305 @@ class DisplayBackendTests(unittest.TestCase):
         self.assertEqual(game.extra["display_backend"], "wayland")
 
 
+class GraphicsTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="graphics tests ")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.graphics = load_graphics(self.root)
+        self.runner = self.root / "Proton with spaces"
+        self.runner.mkdir()
+        (self.runner / "proton").write_text(
+            "import os, shutil\nfrom pathlib import Path\n"
+            "tool = Path(__file__).parent\n"
+            "prefix = Path(os.environ['WINEPREFIX']) / 'drive_c/windows'\n"
+            "for family in ('dxvk', 'vkd3d-proton'):\n"
+            "    for machine, system in (('x86_64-windows', 'system32'), ('i386-windows', 'syswow64')):\n"
+            "        target = prefix / system\n"
+            "        target.mkdir(parents=True, exist_ok=True)\n"
+            "        for dll in (tool / 'files/lib/wine' / family / machine).glob('*.dll'):\n"
+            "            shutil.copyfile(dll, target / dll.name)\n"
+        )
+        (self.runner / "toolmanifest.vdf").write_text('"manifest" { "version" "2" }')
+        self.wine = self.runner / "files/lib/wine/i386-windows/ddraw.dll"
+        self.wine.parent.mkdir(parents=True)
+        self.wine.write_bytes(b"Wine DirectDraw")
+        for family, dlls in (("dxvk", (*self.graphics._DLLS["dxvk"], "d3d8.dll")),
+                             ("vkd3d-proton", ("d3d12.dll", "d3d12core.dll"))):
+            for machine in ("x86_64-windows", "i386-windows"):
+                directory = self.runner / "files/lib/wine" / family / machine
+                directory.mkdir(parents=True)
+                for dll in dlls:
+                    (directory / dll).write_bytes(b"bundled " + dll.encode())
+        for kind in ("dxvk", "vkd3d"):
+            for architecture in ("x64", "x86" if kind == "vkd3d" else "x32"):
+                directory = self.root / kind / "custom" / architecture
+                directory.mkdir(parents=True)
+                for dll in (*self.graphics._DLLS[kind], *self.graphics._OPTIONAL_DLLS[kind]):
+                    (directory / dll).write_bytes(f"custom {kind} {architecture} {dll}".encode())
+        d7vk = self.root / "d7vk/custom/x32/ddraw.dll"
+        d7vk.parent.mkdir(parents=True)
+        d7vk.write_bytes(b"custom D7VK")
+        self.prefix = self.root / "data/prefix"
+        self.system = self.prefix / "drive_c/windows/syswow64"
+        self.system.mkdir(parents=True)
+        (self.system / "ddraw.dll").write_bytes(b"original prefix DirectDraw")
+        self.environment = {"PROTONPATH": str(self.runner), "HOME": str(self.root),
+                            "WINEPREFIX": str(self.prefix),
+                            "WINEDLLOVERRIDES": "d3d11,dxgi,winmm=b;winex11.drv=b"}
+
+    def game(self, **extra):
+        return models.UmuGame(
+            id=uuid4(), name="Graphics", executable=self.root / "game.exe",
+            prefix=models.UmuPrefix(path="prefix", managed=True),
+            proton=str(self.runner), extra={"performance_backend": "none", **extra},
+        )
+
+    def configure(self, game=None, environment=None):
+        environment = dict(self.environment if environment is None else environment)
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            readable = self.graphics.configure_graphics_environment(
+                game or self.game(), self.prefix, environment, self.root / "data"
+            )
+        return environment, readable, output.getvalue()
+
+    def test_legacy_games_leave_proton_and_manual_environment_unchanged(self):
+        environment, readable, output = self.configure()
+        self.assertEqual(environment, self.environment)
+        self.assertFalse(readable)
+        self.assertFalse(output)
+        self.assertFalse((self.root / "data/graphics-tools").exists())
+
+    def test_all_three_components_apply_independently(self):
+        for kind in ("dxvk", "vkd3d", "d7vk"):
+            with self.subTest(kind=kind):
+                environment, readable, output = self.configure(self.game(**{f"{kind}_override": "custom"}))
+                self.assertFalse(output)
+                tool = Path(environment["PROTONPATH"])
+                for family, dll in (("dxvk", "d3d11.dll"), ("vkd3d-proton", "d3d12.dll")):
+                    actual = (tool / "files/lib/wine" / family / "x86_64-windows" / dll).read_bytes()
+                    expected = b"custom" if kind == ("dxvk" if family == "dxvk" else "vkd3d") else b"bundled"
+                    self.assertTrue(actual.startswith(expected))
+                self.assertIn("winmm=b", environment["WINEDLLOVERRIDES"])
+                self.assertIn("winex11.drv=b", environment["WINEDLLOVERRIDES"])
+                self.assertEqual(self.environment["PROTONPATH"], str(self.runner))
+
+    def test_proton_startup_refresh_uses_custom_dxvk_and_vkd3d(self):
+        # Execute the actual UMU command boundary. The fixture refreshes prefix
+        # DLLs from its tool, as Proton does, after our prepare() has returned.
+        launcher = self.root / "umu-run"
+        launcher.write_text(
+            f"#!{sys.executable}\nimport os, sys\n"
+            "os.execv(sys.executable, [sys.executable, os.environ['PROTONPATH'] + '/proton', *sys.argv[1:]])\n"
+        )
+        launcher.chmod(0o755)
+        game = self.game(dxvk_override="custom", vkd3d_override="custom", d7vk_override="custom")
+        with contextlib.redirect_stderr(io.StringIO()):
+            command = make_executor(self.root, self.environment).prepare(game)
+        subprocess.run(command.argv, env=command.env, check=True, timeout=10)
+        for system, arch in (("system32", "x64"), ("syswow64", "x32")):
+            directory = self.prefix / "drive_c/windows" / system
+            self.assertEqual((directory / "d3d11.dll").read_bytes(), f"custom dxvk {arch} d3d11.dll".encode())
+            vkd_arch = "x86" if arch == "x32" else arch
+            self.assertEqual((directory / "d3d12.dll").read_bytes(), f"custom vkd3d {vkd_arch} d3d12.dll".encode())
+        self.assertEqual((self.system / "ddraw.dll").read_bytes(), b"custom D7VK")
+        self.assertEqual((self.system / "ddraw_.dll").read_bytes(), b"Wine DirectDraw")
+        self.assertEqual((self.runner / "files/lib/wine/dxvk/x86_64-windows/d3d11.dll").read_bytes(), b"bundled d3d11.dll")
+        # Returning to the original tool lets Proton refresh its own components.
+        environment, _, _ = self.configure()
+        subprocess.run([sys.executable, str(self.runner / "proton")], env=environment, check=True, timeout=10)
+        self.assertEqual((self.prefix / "drive_c/windows/system32/d3d12.dll").read_bytes(), b"bundled d3d12.dll")
+        self.assertEqual((self.system / "ddraw.dll").read_bytes(), b"original prefix DirectDraw")
+        self.assertFalse((self.system / "ddraw_.dll").exists())
+
+    def test_defaults_restore_previous_dxvk_manifest(self):
+        override = self.graphics.UmuDxvkOverride(self.prefix)
+        override.apply("custom")
+        self.assertTrue(override.manifest.exists())
+        self.configure()
+        self.assertFalse(override.manifest.exists())
+        self.assertFalse((self.prefix / "drive_c/windows/system32/d3d11.dll").exists())
+
+    def test_d7vk_restores_regular_files_symlinks_and_absent_companion(self):
+        for original_kind in ("file", "symlink", "missing"):
+            for companion_exists in (False, True):
+                with self.subTest(original=original_kind, companion=companion_exists):
+                    target = self.system / "ddraw.dll"
+                    companion = self.system / "ddraw_.dll"
+                    target.unlink(missing_ok=True)
+                    companion.unlink(missing_ok=True)
+                    if original_kind == "file":
+                        target.write_bytes(b"original")
+                    elif original_kind == "symlink":
+                        target.symlink_to(self.wine)
+                    if companion_exists:
+                        companion.write_bytes(b"prior companion")
+                    self.configure(self.game(d7vk_override="custom"))
+                    self.assertEqual(target.read_bytes(), b"custom D7VK")
+                    self.assertEqual(companion.read_bytes(), b"Wine DirectDraw")
+                    self.configure()
+                    self.assertEqual(target.is_symlink(), original_kind == "symlink")
+                    self.assertEqual(target.exists(), original_kind != "missing")
+                    if original_kind == "file":
+                        self.assertEqual(target.read_bytes(), b"original")
+                    self.assertEqual(companion.exists(), companion_exists)
+                    if companion_exists:
+                        self.assertEqual(companion.read_bytes(), b"prior companion")
+
+    def test_d7vk_failed_second_copy_rolls_back_both_files(self):
+        companion = self.system / "ddraw_.dll"
+        companion.symlink_to(self.wine)
+        override = self.graphics.UmuD7vkOverride(self.prefix, self.wine)
+        copy = override._atomic_copy
+        count = 0
+
+        def fail_once(source, target):
+            nonlocal count
+            count += 1
+            if count == 2:
+                raise OSError("simulated full disk")
+            return copy(source, target)
+
+        with patch.object(override, "_atomic_copy", side_effect=fail_once):
+            with self.assertRaises(self.graphics.UmuDxvkOverrideError):
+                override.apply("custom")
+        self.assertEqual((self.system / "ddraw.dll").read_bytes(), b"original prefix DirectDraw")
+        self.assertTrue(companion.is_symlink())
+        self.assertEqual(companion.resolve(), self.wine)
+        self.assertFalse(override.manifest.exists())
+
+    def test_wined3d_restores_d7vk_and_keeps_saved_vkd3d_selection(self):
+        self.configure(self.game(d7vk_override="custom"))
+        game = self.game(dxvk_override="wined3d", d7vk_override="proton", vkd3d_override="custom")
+        environment, _, output = self.configure(game)
+        self.assertFalse(output)
+        self.assertEqual(environment["PROTON_USE_WINED3D"], "1")
+        self.assertEqual(environment["PROTONPATH"], str(self.runner))
+        self.assertEqual(game.extra["vkd3d_override"], "custom")
+        self.assertEqual((self.system / "ddraw.dll").read_bytes(), b"original prefix DirectDraw")
+
+    def test_native_override_replaces_conflicting_overrides_only(self):
+        environment = {"WINEDLLOVERRIDES": "d3d11,winmm=b;*DXGI=b;ddraw=n,b"}
+        self.graphics._native_override(environment, ("d3d11", "dxgi"), "n,b")
+        self.assertEqual(environment["WINEDLLOVERRIDES"], "winmm=b;ddraw=n,b;d3d11,dxgi=n,b")
+
+    def test_invalid_or_incomplete_components_do_not_block_other_components(self):
+        for value in (None, [], "../custom", "--help", "custom;foo", "missing"):
+            with self.subTest(value=value):
+                game = self.game(d7vk_override=value, dxvk_override=value, vkd3d_override="custom")
+                environment, _, output = self.configure(game)
+                self.assertTrue(output)
+                self.assertNotEqual(environment["PROTONPATH"], str(self.runner))
+                self.assertEqual((self.system / "ddraw.dll").read_bytes(), b"original prefix DirectDraw")
+        (self.root / "dxvk/custom/x32/d3d11.dll").write_bytes(b"")
+        environment, _, output = self.configure(self.game(dxvk_override="custom"))
+        self.assertIn("incomplete", output)
+        self.assertEqual(environment["PROTONPATH"], str(self.runner))
+
+    def test_legacy_components_can_omit_d3d8_and_d3d12core(self):
+        for architecture in ("x32", "x64"):
+            (self.root / "dxvk/custom" / architecture / "d3d8.dll").unlink()
+        for architecture in ("x86", "x64"):
+            (self.root / "vkd3d/custom" / architecture / "d3d12core.dll").unlink()
+        environment, _, output = self.configure(self.game(dxvk_override="custom", vkd3d_override="custom"))
+        self.assertFalse(output)
+        tool = Path(environment["PROTONPATH"])
+        self.assertEqual((tool / "files/lib/wine/dxvk/i386-windows/d3d8.dll").read_bytes(), b"bundled d3d8.dll")
+
+    def test_private_runner_cache_changes_with_dll_content(self):
+        game = self.game(vkd3d_override="custom")
+        first, readable, _ = self.configure(game)
+        second, _, _ = self.configure(game)
+        self.assertEqual(first["PROTONPATH"], second["PROTONPATH"])
+        self.assertIn(self.runner, readable)
+        self.assertIn(self.root / "vkd3d/custom", readable)
+        (self.root / "vkd3d/custom/x64/d3d12.dll").write_bytes(b"updated")
+        third, _, _ = self.configure(game)
+        self.assertNotEqual(first["PROTONPATH"], third["PROTONPATH"])
+
+    def test_imported_prefixes_are_never_modified(self):
+        game = dataclasses.replace(self.game(d7vk_override="custom", dxvk_override="custom", vkd3d_override="custom"),
+                                   prefix=models.UmuPrefix(path=str(self.prefix), managed=False))
+        environment, paths, output = self.configure(game)
+        self.assertEqual(environment, self.environment)
+        self.assertFalse(paths)
+        self.assertFalse(output)
+        self.assertEqual((self.system / "ddraw.dll").read_bytes(), b"original prefix DirectDraw")
+
+    def test_classic_split_library_and_dist_runner_layouts(self):
+        for distribution in ("files", "dist"):
+            for kind, family in (("dxvk", "dxvk"), ("vkd3d", "vkd3d-proton")):
+                with self.subTest(distribution=distribution, kind=kind):
+                    source = self.root / f"{distribution}-{kind}"
+                    source.mkdir()
+                    for architecture, library in (("x64", "lib64"), ("x32", "lib")):
+                        directory = source / distribution / library / "wine" / family
+                        directory.mkdir(parents=True)
+                        (directory / self.graphics._DLLS[kind][0]).write_bytes(b"bundled")
+                    files, _ = self.graphics._component_files(kind, "custom", source)
+                    self.assertEqual(len(files), 10 if kind == "dxvk" else 4)
+
+    def test_umu_auto_channel_uses_downloaded_runner(self):
+        directory = self.root / ".local/share/umu/compatibilitytools/UMU-Proton"
+        directory.parent.mkdir(parents=True)
+        directory.symlink_to(self.runner, target_is_directory=True)
+        environment, _, output = self.configure(self.game(vkd3d_override="custom"),
+            {**self.environment, "PROTONPATH": "UMU-Proton"})
+        self.assertFalse(output)
+        self.assertTrue(Path(environment["PROTONPATH"]).is_dir())
+
+    def test_runner_library_aliases_resolve_to_the_private_components(self):
+        (self.runner / "files/lib64").symlink_to("lib", target_is_directory=True)
+        environment, _, output = self.configure(self.game(dxvk_override="custom"))
+        self.assertFalse(output)
+        tool = Path(environment["PROTONPATH"])
+        for library in ("lib", "lib64"):
+            dll = tool / "files" / library / "wine/dxvk/x86_64-windows/d3d11.dll"
+            self.assertEqual(dll.read_bytes(), b"custom dxvk x64 d3d11.dll")
+        # The canonical library can also be named lib64, with lib as an alias.
+        (self.runner / "files/lib64").unlink()
+        (self.runner / "files/lib").rename(self.runner / "files/lib64")
+        (self.runner / "files/lib").symlink_to("lib64", target_is_directory=True)
+        environment, _, output = self.configure(self.game(dxvk_override="custom"))
+        self.assertFalse(output)
+        tool = Path(environment["PROTONPATH"])
+        for library in ("lib", "lib64"):
+            dll = tool / "files" / library / "wine/dxvk/x86_64-windows/d3d11.dll"
+            self.assertEqual(dll.read_bytes(), b"custom dxvk x64 d3d11.dll")
+
+    def test_component_metadata_survives_roundtrip(self):
+        game = self.game(d7vk_override="custom", dxvk_override="proton", vkd3d_override="custom")
+        restored = models.UmuGame.from_dict(json.loads(json.dumps(game.to_dict())))
+        self.assertEqual(restored.extra, game.extra)
+
+    def test_failed_prefix_preparation_restores_defaults_without_applying_components(self):
+        launcher = self.root / "umu-run"
+        launcher.write_text(f"#!{sys.executable}\nraise SystemExit(1)\n")
+        launcher.chmod(0o755)
+        game = self.game(d7vk_override="custom", dxvk_override="custom", vkd3d_override="custom")
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            command = make_executor(self.root, self.environment).prepare(game)
+        self.assertEqual(command.env["PROTONPATH"], str(self.runner))
+        self.assertEqual((self.system / "ddraw.dll").read_bytes(), b"original prefix DirectDraw")
+        self.assertIn("prefix preparation failed", output.getvalue())
+
+    def test_umu_component_choices_prevent_removing_used_components(self):
+        tree = ast.parse((SOURCE_ROOT / "bottles/backend/managers/component.py").read_text())
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "ComponentManager")
+        cls.body = [node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "is_in_use"]
+        namespace = {}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[])), "component.py", "exec"), namespace)
+        component = namespace["ComponentManager"]()
+        manager = SimpleNamespace(local_bottles={}, umu_repository=SimpleNamespace(
+            list_games=lambda: [self.game(d7vk_override="custom", dxvk_override="custom", vkd3d_override="custom")]))
+        component._ComponentManager__manager = manager
+        for kind in ("d7vk", "dxvk", "vkd3d"):
+            self.assertTrue(component.is_in_use(kind, "custom"))
+            self.assertFalse(component.is_in_use(kind, "unused"))
+
+
 class GamescopeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="gamescope tests ")
@@ -521,15 +828,23 @@ class GamescopeTests(unittest.TestCase):
             component.mkdir(parents=True)
             for dll in dlls:
                 (component / dll).write_bytes(b"custom DXVK")
-        game = self.game(dxvk_override="custom")
+        runner = self.root / "Proton"
+        runner.mkdir()
+        (runner / "proton").write_text("# Proton\n")
+        for machine in ("x86_64-windows", "i386-windows"):
+            (runner / "files/lib/wine/dxvk" / machine).mkdir(parents=True)
+        game = dataclasses.replace(self.game(dxvk_override="custom"), proton=str(runner))
         prefix = game.prefix.resolve(self.root / "data")
         original = prefix / "drive_c/windows/system32/d3d11.dll"
         original.parent.mkdir(parents=True)
         original.write_bytes(b"bundled Proton DLL")
         command, _ = self.prepare(game, {**self.environment, "PREFIX_LOG": str(prefix_log)})
-        self.assertEqual(original.read_bytes(), b"custom DXVK")
+        self.assertEqual(original.read_bytes(), b"bundled Proton DLL")
+        private_tool = Path(command.env["PROTONPATH"])
+        self.assertNotEqual(private_tool, runner)
+        self.assertEqual((private_tool / "files/lib/wine/dxvk/x86_64-windows/d3d11.dll").read_bytes(), b"custom DXVK")
         self.assertEqual(json.loads(prefix_log.read_text()), {"arguments": [""], "driver": None})
-        self.assertIn("d3d8,d3d9,d3d10core,d3d11,dxgi=n,b", command.env["WINEDLLOVERRIDES"])
+        self.assertIn("d3d10core,d3d11,d3d8,d3d9,dxgi=n,b", command.env["WINEDLLOVERRIDES"])
         self.assertEqual(command.argv[0], str(self.bin / "gamescope"))
         self.prepare(dataclasses.replace(game, extra={**game.extra, "dxvk_override": "wined3d"}))
         self.assertEqual(original.read_bytes(), b"bundled Proton DLL")

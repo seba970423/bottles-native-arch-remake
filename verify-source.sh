@@ -12,6 +12,7 @@ umu_meson="${source_root}/bottles/backend/umu/meson.build"
 umu_executor="${source_root}/bottles/backend/umu/executor.py"
 umu_display="${source_root}/bottles/backend/umu/display_backend.py"
 umu_gamescope="${source_root}/bottles/backend/umu/gamescope.py"
+umu_graphics="${source_root}/bottles/backend/umu/graphics.py"
 library_blueprint="${source_root}/bottles/frontend/ui/library-entry.blp"
 library_widget="${source_root}/bottles/frontend/widgets/library.py"
 library_view="${source_root}/bottles/frontend/views/library.py"
@@ -27,6 +28,14 @@ for feature in \
   "${umu_dialog}:Choose the UMU Game Location" \
   "${umu_blueprint}:Managed Prefix Location" \
   "${umu_game_blueprint}:combo_dxvk_override" \
+  "${umu_game_blueprint}:combo_d7vk_override" \
+  "${umu_game_blueprint}:combo_vkd3d_override" \
+  "${umu_dialog}:def __graphics_rows" \
+  "${umu_dialog}:def __update_graphics" \
+  "${umu_graphics}:class UmuD7vkOverride" \
+  "${umu_graphics}:def configure_graphics_environment" \
+  "${umu_graphics}:def _private_runner" \
+  "${umu_meson}:'graphics.py'" \
   "${umu_game_blueprint}:combo_sync_backend" \
   "${umu_game_blueprint}:combo_display_backend" \
   "${umu_game_blueprint}:switch_gamescope" \

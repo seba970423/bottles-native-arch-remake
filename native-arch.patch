@@ -1,3 +1,22 @@
+diff --git a/bottles/backend/managers/component.py b/bottles/backend/managers/component.py
+index 340ed36..8dc1647 100644
+--- a/bottles/backend/managers/component.py
++++ b/bottles/backend/managers/component.py
+@@ -735,6 +735,14 @@ class ComponentManager:
+     def is_in_use(self, component_type: str, component_name: str):
+         bottles = self.__manager.local_bottles
+ 
++        if component_type in ("d7vk", "dxvk", "vkd3d"):
++            repository = getattr(self.__manager, "umu_repository", None)
++            if repository and any(
++                game.extra.get(f"{component_type}_override") == component_name
++                for game in repository.list_games()
++            ):
++                return True
++
+         if component_type in ["runner", "runner:proton"]:
+             used_by_bottle = component_name in [
+                 b["Runner"] for _, b in bottles.items()
 diff --git a/bottles/backend/managers/manager.py b/bottles/backend/managers/manager.py
 index 4d320ed..acac159 100644
 --- a/bottles/backend/managers/manager.py
@@ -227,10 +246,10 @@ index 0000000..45be1d7
 +    return resolution
 diff --git a/bottles/backend/umu/dxvk_override.py b/bottles/backend/umu/dxvk_override.py
 new file mode 100644
-index 0000000..ccde842
+index 0000000..8b5405f
 --- /dev/null
 +++ b/bottles/backend/umu/dxvk_override.py
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,169 @@
 +import json
 +import os
 +import re
@@ -254,6 +273,8 @@ index 0000000..ccde842
 +
 +class UmuDxvkOverride:
 +    """Transactional, per-prefix DXVK override for managed UMU games."""
++
++    label = "DXVK"
 +
 +    def __init__(self, prefix: Path):
 +        self.prefix = prefix.resolve(strict=False)
@@ -308,24 +329,25 @@ index 0000000..ccde842
 +                    backup.relative_to(self.state)
 +                    self._atomic_copy(backup, target)
 +                else:
-+                    raise UmuDxvkOverrideError("Invalid DXVK backup manifest")
++                    raise UmuDxvkOverrideError(f"Invalid {self.label} backup manifest")
 +            self.manifest.unlink(missing_ok=True)
++            for entry in entries:
++                backup_name = entry.get("backup", "")
++                if re.fullmatch(r"[a-f0-9]{32}-[0-9]+\.dll", backup_name):
++                    try:
++                        (self.state / backup_name).unlink(missing_ok=True)
++                    except OSError:
++                        pass
 +            return True
 +        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
 +            raise UmuDxvkOverrideError(
-+                f"Could not restore the bundled Proton DXVK: {error}"
++                f"Could not restore the original {self.label} DLLs: {error}"
 +            ) from error
 +
 +    def apply(self, version: str) -> None:
 +        if not _SAFE_COMPONENT.fullmatch(version):
-+            raise UmuDxvkOverrideError("Invalid DXVK component name")
-+        source_root = Path(Paths.dxvk) / version
-+        sources = []
-+        for architecture, dll, target in self._targets(self.prefix):
-+            source = source_root / architecture / dll
-+            if not source.is_file():
-+                raise UmuDxvkOverrideError(f"DXVK {version} is incomplete: {source}")
-+            sources.append((source, target))
++            raise UmuDxvkOverrideError(f"Invalid {self.label} component name")
++        sources = self._sources(version)
 +
 +        self.restore()
 +        generation = uuid4().hex
@@ -364,9 +386,19 @@ index 0000000..ccde842
 +                self.restore()
 +            except UmuDxvkOverrideError as restore_error:
 +                raise UmuDxvkOverrideError(
-+                    f"DXVK apply failed and rollback also failed: {restore_error}"
++                    f"{self.label} apply failed and rollback also failed: {restore_error}"
 +                ) from error
-+            raise UmuDxvkOverrideError(f"Could not apply DXVK {version}: {error}") from error
++            raise UmuDxvkOverrideError(f"Could not apply {self.label} {version}: {error}") from error
++
++    def _sources(self, version: str):
++        source_root = Path(Paths.dxvk) / version
++        sources = []
++        for architecture, dll, target in self._targets(self.prefix):
++            source = source_root / architecture / dll
++            if not source.is_file():
++                raise UmuDxvkOverrideError(f"DXVK {version} is incomplete: {source}")
++            sources.append((source, target))
++        return sources
 +
 +
 +def configure_dxvk_environment(game: UmuGame, prefix: Path, environment: dict[str, str]):
@@ -388,7 +420,7 @@ index 0000000..ccde842
 +    native = f"{DXVK_OVERRIDE_KEYS}=n,b"
 +    environment["WINEDLLOVERRIDES"] = f"{existing};{native}" if existing else native
 diff --git a/bottles/backend/umu/executor.py b/bottles/backend/umu/executor.py
-index ac5264e..af7ac86 100644
+index ac5264e..a0ac7db 100644
 --- a/bottles/backend/umu/executor.py
 +++ b/bottles/backend/umu/executor.py
 @@ -1,6 +1,7 @@
@@ -399,20 +431,21 @@ index ac5264e..af7ac86 100644
  import signal
  import subprocess
  import sys
-@@ -15,6 +16,12 @@ from uuid import UUID
+@@ -15,6 +16,13 @@ from uuid import UUID
  from bottles.backend.globals import Paths
  from bottles.backend.managers.sandbox import SandboxManager
  from bottles.backend.umu.models import UmuGame
 +from bottles.backend.umu.display_backend import configure_display_environment
 +from bottles.backend.umu.gamescope import resolve_gamescope, wrap_gamescope
-+from bottles.backend.umu.dxvk_override import (
-+    UmuDxvkOverrideError,
-+    configure_dxvk_environment,
++from bottles.backend.umu.dxvk_override import UmuDxvkOverrideError
++from bottles.backend.umu.graphics import (
++    configure_graphics_environment,
++    custom_graphics_requested,
 +)
  from bottles.backend.umu.processes import prefix_has_process
  from bottles.backend.umu.proton import UmuProtonCatalog
  from bottles.backend.umu.provider import UmuInstallation
-@@ -64,6 +71,13 @@ class UmuWinetricksError(ValueError):
+@@ -64,6 +72,13 @@ class UmuWinetricksError(ValueError):
  
  
  _WINETRICKS_VERB_PATTERN = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_-]*(=[a-zA-Z0-9]*)?$")
@@ -426,7 +459,7 @@ index ac5264e..af7ac86 100644
  _SESSION_BUS_PREFIX = "unix:path="
  
  
-@@ -135,6 +149,39 @@ class UmuExecutor:
+@@ -135,6 +150,39 @@ class UmuExecutor:
      def _absolute_path(path: Path) -> Path:
          return path.expanduser().resolve(strict=False)
  
@@ -466,7 +499,7 @@ index ac5264e..af7ac86 100644
      def _sandbox_proton(
          self, game: UmuGame, proton: str
      ) -> tuple[str, tuple[Path, ...]]:
-@@ -251,18 +298,175 @@ class UmuExecutor:
+@@ -251,18 +299,173 @@ class UmuExecutor:
              if game.working_directory
              else None
          )
@@ -522,8 +555,8 @@ index ac5264e..af7ac86 100644
 +                file=sys.stderr,
 +            )
 +        dxvk_selection = game.extra.get("dxvk_override", "proton")
-+        dxvk_ready = True
-+        if game.prefix.managed and dxvk_selection not in ("proton", "wined3d"):
++        graphics_ready = True
++        if custom_graphics_requested(game):
 +            prefix_command = self.prepare_prefix(game)
 +            try:
 +                prefix_result = subprocess.run(
@@ -535,30 +568,28 @@ index ac5264e..af7ac86 100644
 +                    text=True,
 +                    timeout=300,
 +                )
-+                dxvk_ready = prefix_result.returncode == 0
++                graphics_ready = prefix_result.returncode == 0
 +            except (OSError, subprocess.TimeoutExpired) as error:
-+                dxvk_ready = False
++                graphics_ready = False
 +                print(
-+                    f"Bottles: could not prepare the prefix for its DXVK "
-+                    f"override: {error}",
++                    f"Bottles: could not prepare the prefix for its graphics "
++                    f"overrides: {error}",
 +                    file=sys.stderr,
 +                )
 +        try:
-+            if dxvk_ready:
-+                configure_dxvk_environment(
-+                    game, game.prefix.resolve(self.data_root), environment
-+                )
-+            else:
++            if not graphics_ready:
 +                print(
 +                    "Bottles: prefix preparation failed; launching with the "
-+                    "bundled Proton DXVK.",
++                    "bundled Proton graphics components.",
 +                    file=sys.stderr,
 +                )
-+        except UmuDxvkOverrideError as error:
-+            print(
-+                f"Bottles: {error}; launching with the bundled Proton DXVK.",
-+                file=sys.stderr,
++            graphics_paths = configure_graphics_environment(
++                game, game.prefix.resolve(self.data_root), environment,
++                self.data_root, allow_custom=graphics_ready,
 +            )
++            readable_paths = tuple(sorted({*readable_paths, *graphics_paths}))
++        except (OSError, ValueError, UmuDxvkOverrideError) as error:
++            raise UmuProcessError(f"Could not restore graphics component backups: {error}") from error
 +
 +        mangohud_enabled = environment.get("MANGOHUD", "").strip().lower() not in (
 +            "",
@@ -647,7 +678,7 @@ index ac5264e..af7ac86 100644
      def prepare_prefix(self, game: UmuGame) -> UmuCommand:
          environment, readable_paths = self._environment(game, prefix_only=True)
          return UmuCommand(
-@@ -411,6 +615,7 @@ class UmuExecutor:
+@@ -411,6 +614,7 @@ class UmuExecutor:
              )
              tracked = _TrackedProcess(process=process, pgid=process.pid)
              self._processes[game.id] = tracked
@@ -830,11 +861,274 @@ index 0000000..2607353
 +                "mangohud package for the Gamescope overlay."
 +            )
 +    return (*arguments, "--", *argv), reason
+diff --git a/bottles/backend/umu/graphics.py b/bottles/backend/umu/graphics.py
+new file mode 100644
+index 0000000..8b8754e
+--- /dev/null
++++ b/bottles/backend/umu/graphics.py
+@@ -0,0 +1,257 @@
++"""Independent graphics component selection for managed UMU prefixes."""
++
++import hashlib
++import os
++import re
++import shutil
++import sys
++import tempfile
++from pathlib import Path
++
++from bottles.backend.globals import Paths
++from bottles.backend.umu.dxvk_override import UmuDxvkOverride, UmuDxvkOverrideError
++
++
++GRAPHICS_DEFAULT_IDS = {
++    "d7vk": ("proton",),
++    "dxvk": ("proton", "wined3d"),
++    "vkd3d": ("proton",),
++}
++_SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
++_DLLS = {
++    "dxvk": ("d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll"),
++    "vkd3d": ("d3d12.dll",),
++}
++_OPTIONAL_DLLS = {"dxvk": ("d3d8.dll",), "vkd3d": ("d3d12core.dll",)}
++
++
++def custom_graphics_requested(game):
++    return game.prefix.managed and any(
++        game.extra.get(f"{kind}_override", "proton") not in defaults
++        for kind, defaults in GRAPHICS_DEFAULT_IDS.items()
++        # Proton's WineD3D switch also disables its VKD3D setup.
++        if kind != "vkd3d" or game.extra.get("dxvk_override") != "wined3d"
++    )
++
++
++def _native_override(environment, names, mode):
++    """Replace only the affected DLL keys, retaining unrelated overrides."""
++    affected = set(names)
++    overrides = []
++    for entry in environment.get("WINEDLLOVERRIDES", "").split(";"):
++        if not entry:
++            continue
++        keys, separator, value = entry.partition("=")
++        remaining = [key for key in keys.split(",")
++                     if key.strip().lstrip("*").casefold() not in affected]
++        if remaining:
++            overrides.append(",".join(remaining) + separator + value)
++    overrides.append(f"{','.join(names)}={mode}")
++    environment["WINEDLLOVERRIDES"] = ";".join(overrides)
++
++
++def _installed_proton(value, environment):
++    source = Path(value).expanduser()
++    if value in ("UMU-Proton", "GE-Proton"):
++        # UMU's automatic channels are installed here by prefix preparation.
++        home = Path(environment.get("HOME", str(Path.home())))
++        data_home = Path(environment.get("UMU_FOLDERS_PATH") or
++                         environment.get("XDG_DATA_HOME") or home / ".local/share")
++        source = data_home / "umu/compatibilitytools" / value
++    if not source.is_absolute() or not (source / "proton").is_file():
++        raise ValueError("Select an installed Proton runner to override graphics components")
++    return source.resolve()
++
++
++def _runner_directory(source, family, architecture):
++    def canonical(directory):
++        try:
++            return (source / directory).resolve().relative_to(source.resolve())
++        except ValueError:
++            return directory
++
++    machine = "x86_64-windows" if architecture == "x64" else "i386-windows"
++    libraries = ("lib", "lib64") if architecture == "x64" else ("lib",)
++    for distribution in ("files", "dist"):
++        for library in libraries:
++            directory = Path(distribution) / library / "wine" / family / machine
++            if (source / directory).is_dir():
++                return canonical(directory)
++        library = "lib64" if architecture == "x64" else "lib"
++        directory = Path(distribution) / library / "wine" / family
++        if (source / directory / _DLLS["dxvk" if family == "dxvk" else "vkd3d"][0]).is_file():
++            return canonical(directory)
++    raise ValueError(f"The selected Proton has no {architecture} {family} directory")
++
++
++def _wine_ddraw(source):
++    for distribution in ("files", "dist"):
++        for relative in ("lib/wine/i386-windows/ddraw.dll",
++                         "share/default_pfx/drive_c/windows/syswow64/ddraw.dll"):
++            candidate = source / distribution / relative
++            if candidate.is_file():
++                return candidate
++    raise ValueError("The selected Proton has no 32-bit Wine ddraw.dll for D7VK")
++
++
++def _component_files(kind, version, source):
++    if not isinstance(version, str) or not _SAFE_COMPONENT.fullmatch(version):
++        raise ValueError(f"Invalid {kind.upper()} component name")
++    root = Path(getattr(Paths, kind)) / version
++    replacements = {}
++    for architecture in ("x64", "x32"):
++        component_arch = "x86" if kind == "vkd3d" and architecture == "x32" else architecture
++        directory = _runner_directory(source, "dxvk" if kind == "dxvk" else "vkd3d-proton", architecture)
++        for dll in (*_DLLS[kind], *_OPTIONAL_DLLS[kind]):
++            candidate = root / component_arch / dll
++            if not candidate.is_file() or candidate.stat().st_size == 0:
++                if dll in _OPTIONAL_DLLS[kind]:
++                    continue
++                raise ValueError(f"{kind.upper()} {version} is incomplete: {candidate}")
++            replacements[directory / dll] = candidate.resolve()
++    return replacements, root.resolve()
++
++
++def _mirror_runner(source, target, replacements, relative=Path(), origin=None):
++    """Copy control files and changed DLLs; share the rest of the runner."""
++    target.mkdir()
++    origin = source.resolve() if origin is None else origin
++    children = {child.name: child for child in source.iterdir()}
++    names = set(children) | {path.parts[0] for path in replacements}
++    for name in sorted(names):
++        if relative == Path() and name in ("dist.lock", "__pycache__"):
++            continue
++        child = children.get(name)
++        destination = target / name
++        key = Path(name)
++        if key in replacements:
++            shutil.copy2(replacements[key], destination)
++            continue
++        nested = {Path(*path.parts[1:]): value for path, value in replacements.items()
++                  if len(path.parts) > 1 and path.parts[0] == name}
++        if nested:
++            if child is None or not child.is_dir():
++                raise ValueError(f"Missing Proton directory: {relative / name}")
++            _mirror_runner(child, destination, nested, relative / name, origin)
++        elif child is not None:
++            if relative == Path() and child.is_file():
++                # __file__/realpath in runner scripts must point at the private tool.
++                shutil.copy2(child, destination)
++            else:
++                link = child.resolve()
++                if child.is_symlink():
++                    original = os.readlink(child)
++                    if not Path(original).is_absolute() and link.is_relative_to(origin):
++                        # Keep aliases such as lib64 -> lib pointing into the
++                        # private tool, where the selected DLLs now live.
++                        link = original
++                destination.symlink_to(link, target_is_directory=child.is_dir())
++
++
++def _private_runner(source, replacements, cache_root):
++    digest = hashlib.sha256(str(source).encode())
++    for control in ("proton", "version", "toolmanifest.vdf", "user_settings.py"):
++        path = source / control
++        if path.is_file():
++            digest.update(path.read_bytes())
++    for destination, path in sorted(replacements.items()):
++        digest.update(str(destination).encode())
++        digest.update(str(path).encode())
++        digest.update(path.read_bytes())
++    cache_root.mkdir(parents=True, exist_ok=True)
++    target = cache_root / digest.hexdigest()
++    if not target.is_dir():
++        stage = Path(tempfile.mkdtemp(prefix=".graphics-", dir=cache_root))
++        try:
++            _mirror_runner(source, stage / "tool", replacements)
++            try:
++                (stage / "tool").rename(target)
++            except OSError:
++                if not target.is_dir():
++                    raise
++        finally:
++            shutil.rmtree(stage)
++    return target
++
++
++class UmuD7vkOverride(UmuDxvkOverride):
++    """Preserve both original DirectDraw files, including symlinks and absences."""
++
++    label = "D7VK"
++
++    def __init__(self, prefix, wine_ddraw=None):
++        super().__init__(prefix)
++        self.state = self.prefix / ".bottles/d7vk-override"
++        self.manifest = self.state / "manifest.json"
++        self.wine_ddraw = wine_ddraw
++
++    def _sources(self, version):
++        source = Path(Paths.d7vk) / version / "x32/ddraw.dll"
++        if not source.is_file() or not source.stat().st_size:
++            raise UmuDxvkOverrideError(f"D7VK {version} is incomplete: {source}")
++        if self.wine_ddraw is None or not self.wine_ddraw.is_file():
++            raise UmuDxvkOverrideError("D7VK requires Wine's original 32-bit ddraw.dll")
++        system = self.prefix / "drive_c/windows/syswow64"
++        return [(source, system / "ddraw.dll"), (self.wine_ddraw, system / "ddraw_.dll")]
++
++
++def configure_graphics_environment(game, prefix, environment, data_root, *, allow_custom=True):
++    """Return extra paths required by a dedicated sandbox, without editing Proton."""
++    if not game.prefix.managed:
++        return ()
++    # Migrate the previous prefix-only DXVK implementation. Proton refreshes
++    # these DLLs on launch, so custom DXVK/VKD3D must come from its private tool.
++    UmuDxvkOverride(prefix).restore()
++    selections = {kind: game.extra.get(f"{kind}_override", "proton")
++                  for kind in GRAPHICS_DEFAULT_IDS}
++    if not allow_custom:
++        selections = {kind: value if value in GRAPHICS_DEFAULT_IDS[kind] else "proton"
++                      for kind, value in selections.items()}
++    wined3d = selections["dxvk"] == "wined3d"
++    if wined3d:
++        environment["PROTON_USE_WINED3D"] = "1"
++    replacements = {}
++    selected_files = {}
++    readable = set()
++    source = None
++    for kind in ("dxvk", "vkd3d"):
++        selection = selections[kind]
++        if selection in GRAPHICS_DEFAULT_IDS[kind] or (kind == "vkd3d" and wined3d):
++            continue
++        try:
++            source = _installed_proton(environment["PROTONPATH"], environment)
++            files, root = _component_files(kind, selection, source)
++            replacements.update(files)
++            selected_files[kind] = files
++            readable.add(root)
++        except (OSError, ValueError) as error:
++            print(f"Bottles: {error}; using Proton's {kind.upper()} for this launch.", file=sys.stderr)
++    if replacements:
++        try:
++            tool = _private_runner(source, replacements, Path(data_root) / "graphics-tools")
++            environment["PROTONPATH"] = str(tool)
++            readable.add(source)
++            for kind, files in selected_files.items():
++                _native_override(environment, tuple(sorted({path.stem for path in files})), "n,b")
++                if kind == "dxvk":
++                    environment.pop("PROTON_USE_WINED3D", None)
++                    if any(path.name == "d3d8.dll" for path in files):
++                        environment["PROTON_DXVK_D3D8"] = "1"
++        except (OSError, ValueError) as error:
++            print(f"Bottles: could not prepare graphics overrides: {error}; using Proton's bundled DLLs.", file=sys.stderr)
++    d7vk = UmuD7vkOverride(prefix)
++    selection = selections["d7vk"]
++    if selection in GRAPHICS_DEFAULT_IDS["d7vk"]:
++        d7vk.restore()
++    else:
++        try:
++            if not isinstance(selection, str) or not _SAFE_COMPONENT.fullmatch(selection):
++                raise ValueError("Invalid D7VK component name")
++            source = _installed_proton(environment["PROTONPATH"], environment)
++            d7vk.wine_ddraw = _wine_ddraw(source)
++            d7vk.apply(selection)
++            _native_override(environment, ("ddraw",), "n,b")
++        except (OSError, ValueError, UmuDxvkOverrideError) as error:
++            d7vk.restore()
++            print(f"Bottles: {error}; using Proton's DirectDraw for this launch.", file=sys.stderr)
++    return tuple(sorted(readable))
 diff --git a/bottles/backend/umu/meson.build b/bottles/backend/umu/meson.build
-index 594dc01..1a5632e 100644
+index 594dc01..e8d0987 100644
 --- a/bottles/backend/umu/meson.build
 +++ b/bottles/backend/umu/meson.build
-@@ -5,7 +5,10 @@ bottles_sources = [
+@@ -5,7 +5,11 @@ bottles_sources = [
    '__init__.py',
    'database.py',
    'dependencies.py',
@@ -842,6 +1136,7 @@ index 594dc01..1a5632e 100644
 +  'dxvk_override.py',
    'executor.py',
 +  'gamescope.py',
++  'graphics.py',
    'models.py',
    'processes.py',
    'provider.py',
@@ -863,17 +1158,35 @@ index 6ff7c01..c26ea0b 100644
    '__init__.py',
    'main.py',
 diff --git a/bottles/frontend/ui/dialog-umu-game.blp b/bottles/frontend/ui/dialog-umu-game.blp
-index 78adbc1..d7bd7fc 100644
+index 78adbc1..20169fc 100644
 --- a/bottles/frontend/ui/dialog-umu-game.blp
 +++ b/bottles/frontend/ui/dialog-umu-game.blp
-@@ -117,6 +117,116 @@ template $UmuGameDialog: Adw.Dialog {
+@@ -117,6 +117,134 @@ template $UmuGameDialog: Adw.Dialog {
        Adw.PreferencesGroup {
          title: _("Launch");
  
++        Adw.ComboRow combo_d7vk_override {
++          title: _("D7VK");
++          subtitle: _("Direct3D 3–7. Choose Proton's default or an installed component.");
++          subtitle-lines: 2;
++          enable-search: true;
++          model: StringList d7vk_overrides {};
++        }
++
 +        Adw.ComboRow combo_dxvk_override {
 +          title: _("DXVK");
-+          subtitle: _("Override the DXVK bundled with the selected Proton for this managed prefix.");
++          subtitle: _("Direct3D 8–11. WineD3D uses OpenGL and also disables VKD3D.");
++          subtitle-lines: 2;
++          enable-search: true;
 +          model: StringList dxvk_overrides {};
++        }
++
++        Adw.ComboRow combo_vkd3d_override {
++          title: _("VKD3D");
++          subtitle: _("Direct3D 12. Choose Proton's version or an installed component.");
++          subtitle-lines: 2;
++          enable-search: true;
++          model: StringList vkd3d_overrides {};
 +        }
 +
 +        Adw.ComboRow combo_sync_backend {
@@ -1328,7 +1641,7 @@ index bc14a8e..40db59a 100644
      # hide() and show() are essentialy workarounds to avoid keeping
      # the empty space of the hidden entry in the GtkFlowBox
 diff --git a/bottles/frontend/windows/umu.py b/bottles/frontend/windows/umu.py
-index 4ec2f72..d2726a0 100644
+index 4ec2f72..fbd9ddb 100644
 --- a/bottles/frontend/windows/umu.py
 +++ b/bottles/frontend/windows/umu.py
 @@ -14,7 +14,10 @@
@@ -1342,7 +1655,7 @@ index 4ec2f72..d2726a0 100644
  from concurrent.futures import ThreadPoolExecutor
  from gettext import gettext as _, ngettext
  from pathlib import Path
-@@ -32,6 +35,19 @@ from bottles.backend.umu import (
+@@ -32,6 +35,20 @@ from bottles.backend.umu import (
      UmuPrefix,
      UmuRepositoryError,
  )
@@ -1359,15 +1672,15 @@ index 4ec2f72..d2726a0 100644
 +    resolution_preset,
 +    resolve_gamescope,
 +)
++from bottles.backend.umu.graphics import GRAPHICS_DEFAULT_IDS
  from bottles.backend.utils.manager import ManagerUtils
  from bottles.backend.utils.threading import RunAsync
  from bottles.frontend.utils.sh import ShUtils
-@@ -42,6 +58,9 @@ logging = Logger()
+@@ -42,6 +59,8 @@ logging = Logger()
  
  STORE_IDS = UMU_STORE_IDS
  DEPENDENCY_TOOL_IDS = ("bottles", "winetricks")
 +PERFORMANCE_BACKEND_IDS = ("gamemode", "system76", "both", "none")
-+DXVK_DEFAULT_IDS = ("proton", "wined3d")
 +SYNC_BACKEND_IDS = ("proton", "ntsync", "fsync", "esync", "disabled")
  
  
@@ -1554,7 +1867,7 @@ index 4ec2f72..d2726a0 100644
              "source_mode": "imported" if importing else "installer",
          }
          if not importing:
-@@ -1415,6 +1551,30 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1415,6 +1551,34 @@ class UmuGameDialog(Adw.Dialog):
      entry_game_id = Gtk.Template.Child()
      combo_store = Gtk.Template.Child()
      stores = Gtk.Template.Child()
@@ -1562,6 +1875,10 @@ index 4ec2f72..d2726a0 100644
 +    performance_backends = Gtk.Template.Child()
 +    combo_dxvk_override = Gtk.Template.Child()
 +    dxvk_overrides = Gtk.Template.Child()
++    combo_d7vk_override = Gtk.Template.Child()
++    d7vk_overrides = Gtk.Template.Child()
++    combo_vkd3d_override = Gtk.Template.Child()
++    vkd3d_overrides = Gtk.Template.Child()
 +    combo_sync_backend = Gtk.Template.Child()
 +    sync_backends = Gtk.Template.Child()
 +    combo_display_backend = Gtk.Template.Child()
@@ -1585,7 +1902,7 @@ index 4ec2f72..d2726a0 100644
      row_arguments = Gtk.Template.Child()
      row_working_directory = Gtk.Template.Child()
      btn_working_directory = Gtk.Template.Child()
-@@ -1448,6 +1608,54 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1448,6 +1612,71 @@ class UmuGameDialog(Adw.Dialog):
          )
          self.arguments = tuple(game.arguments)
          self.environment = dict(game.environment)
@@ -1593,8 +1910,25 @@ index 4ec2f72..d2726a0 100644
 +            "performance_backend",
 +            window.settings.get_string("umu-performance-backend"),
 +        )
-+        self.dxvk_override_ids = [*DXVK_DEFAULT_IDS]
-+        self.dxvk_override_ids.extend(window.manager.dxvk_available)
++        self.graphics_override_ids = {}
++        for kind, combo, model in self.__graphics_rows():
++            values = [*GRAPHICS_DEFAULT_IDS[kind], *getattr(window.manager, f"{kind}_available")]
++            saved = game.extra.get(f"{kind}_override", "proton")
++            if isinstance(saved, str) and saved not in values:
++                values.append(saved)
++            self.graphics_override_ids[kind] = values
++            for value in values:
++                if value == "proton":
++                    label = _("Proton Default")
++                elif value == "wined3d":
++                    label = "WineD3D"
++                elif value == saved and value not in getattr(window.manager, f"{kind}_available"):
++                    label = _("{0} (Missing)").format(value)
++                else:
++                    label = value
++                model.append(label)
++            _select_id(combo, values, saved)
++            combo.set_sensitive(self.prefix_managed)
 +        self._gamescope_install_pending = False
 +        try:
 +            gamescope = GamescopeSettings.from_dict(game.extra.get("gamescope"))
@@ -1640,7 +1974,7 @@ index 4ec2f72..d2726a0 100644
          self.switch_sandbox.set_active(game.sandbox)
          self.switch_network.set_active(game.share_net)
          self.installed_dependency_rows = []
-@@ -1456,6 +1664,16 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1456,6 +1685,12 @@ class UmuGameDialog(Adw.Dialog):
              self.stores.append(label)
          for label in _dependency_tool_labels():
              self.dependency_tools.append(label)
@@ -1650,14 +1984,10 @@ index 4ec2f72..d2726a0 100644
 +            self.sync_backends.append(label)
 +        for label in _display_backend_labels():
 +            self.display_backends.append(label)
-+        self.dxvk_overrides.append(_("Bundled with selected Proton (Recommended)"))
-+        self.dxvk_overrides.append(_("WineD3D (Disable DXVK)"))
-+        for version in window.manager.dxvk_available:
-+            self.dxvk_overrides.append(version)
  
          self.entry_name.set_text(game.name)
          self.row_executable.set_subtitle(self.executable)
-@@ -1471,6 +1689,28 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1471,6 +1706,23 @@ class UmuGameDialog(Adw.Dialog):
          )
          self.entry_game_id.set_text(game.game_id)
          _select_id(self.combo_store, STORE_IDS, game.store)
@@ -1666,12 +1996,7 @@ index 4ec2f72..d2726a0 100644
 +            PERFORMANCE_BACKEND_IDS,
 +            self.performance_backend,
 +        )
-+        _select_id(
-+            self.combo_dxvk_override,
-+            self.dxvk_override_ids,
-+            game.extra.get("dxvk_override", "proton"),
-+        )
-+        self.combo_dxvk_override.set_sensitive(self.prefix_managed)
++        self.__update_graphics()
 +        _select_id(
 +            self.combo_sync_backend,
 +            SYNC_BACKEND_IDS,
@@ -1686,10 +2011,11 @@ index 4ec2f72..d2726a0 100644
          self.__update_arguments()
          self.__update_environment()
          self.__update_working_directory()
-@@ -1491,6 +1731,24 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1491,6 +1743,25 @@ class UmuGameDialog(Adw.Dialog):
          self.btn_executable.connect("clicked", self.__choose_executable)
          self.btn_prefix.connect("clicked", self.__prefix_action)
          self.btn_proton.connect("clicked", self.__choose_proton)
++        self.combo_dxvk_override.connect("notify::selected", self.__update_graphics)
 +        self.switch_mangohud.connect("notify::active", self.__toggle_mangohud)
 +        self.switch_gamescope.connect("notify::active", self.__gamescope_changed)
 +        self.combo_gamescope_filter.connect(
@@ -1711,7 +2037,7 @@ index 4ec2f72..d2726a0 100644
          self.row_arguments.connect("activated", self.__choose_arguments)
          self.row_environment.connect("activated", self.__choose_environment)
          self.btn_working_directory.connect("clicked", self.__choose_working_directory)
-@@ -1504,6 +1762,12 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1504,12 +1775,35 @@ class UmuGameDialog(Adw.Dialog):
          self.combo_dependency_tool.connect(
              "notify::selected", self.__dependency_tool_changed
          )
@@ -1724,7 +2050,30 @@ index 4ec2f72..d2726a0 100644
          self.entry_winetricks.connect("changed", self.__dependency_tool_changed)
          self.btn_remove.connect("clicked", self.__confirm_remove)
          self.__validate_settings()
-@@ -1545,10 +1809,22 @@ class UmuGameDialog(Adw.Dialog):
+         self.__update_installed_dependencies()
+         self.__dependency_tool_changed()
+ 
++    def __graphics_rows(self):
++        return (
++            ("d7vk", self.combo_d7vk_override, self.d7vk_overrides),
++            ("dxvk", self.combo_dxvk_override, self.dxvk_overrides),
++            ("vkd3d", self.combo_vkd3d_override, self.vkd3d_overrides),
++        )
++
++    def __update_graphics(self, *_args):
++        wined3d = _selected_id(
++            self.combo_dxvk_override, self.graphics_override_ids["dxvk"]
++        ) == "wined3d"
++        self.combo_vkd3d_override.set_sensitive(self.prefix_managed and not wined3d)
++        self.combo_vkd3d_override.set_subtitle(
++            _("WineD3D disables VKD3D. Your selection applies when DXVK is restored.")
++            if wined3d else _("Direct3D 12. Choose Proton's version or an installed component.")
++        )
++
+     def __update_installed_dependencies(self):
+         dependencies = self.game.extra.get("installed_dependencies", [])
+         winetricks = self.game.extra.get("installed_winetricks", [])
+@@ -1545,10 +1839,22 @@ class UmuGameDialog(Adw.Dialog):
          self.row_installed_dependencies.set_subtitle(str(count))
  
      def __validate_settings(self, *_args):
@@ -1749,7 +2098,7 @@ index 4ec2f72..d2726a0 100644
          executable_valid = bool(self.executable)
          self.btn_save.set_sensitive(
              all(valid for _row, valid in rows) and executable_valid
-@@ -1654,6 +1930,58 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1654,6 +1960,58 @@ class UmuGameDialog(Adw.Dialog):
      def __set_proton(self, value, title):
          self.proton = value
          self.label_proton.set_label(title)
@@ -1808,7 +2157,7 @@ index 4ec2f72..d2726a0 100644
  
      def __choose_arguments(self, *_args):
          UmuArgumentsDialog(
-@@ -1662,6 +1990,167 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1662,6 +2020,167 @@ class UmuGameDialog(Adw.Dialog):
              self.__set_arguments,
          ).present(self)
  
@@ -1976,7 +2325,7 @@ index 4ec2f72..d2726a0 100644
      def __set_arguments(self, arguments):
          self.arguments = tuple(arguments)
          self.__update_arguments()
-@@ -1671,6 +2160,239 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1671,6 +2190,239 @@ class UmuGameDialog(Adw.Dialog):
              shlex.join(self.arguments) if self.arguments else _("None")
          )
  
@@ -2216,7 +2565,7 @@ index 4ec2f72..d2726a0 100644
      def __choose_environment(self, *_args):
          UmuEnvironmentDialog(
              self.window,
-@@ -1680,7 +2402,12 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1680,7 +2432,12 @@ class UmuGameDialog(Adw.Dialog):
  
      def __set_environment(self, environment):
          self.environment = dict(environment)
@@ -2229,16 +2578,15 @@ index 4ec2f72..d2726a0 100644
  
      def __update_environment(self):
          count = len(self.environment)
-@@ -1727,6 +2454,19 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1727,6 +2484,18 @@ class UmuGameDialog(Adw.Dialog):
                  "dependency_tool": _selected_id(
                      self.combo_dependency_tool, DEPENDENCY_TOOL_IDS
                  ),
 +                "performance_backend": _selected_id(
 +                    self.combo_performance_backend, PERFORMANCE_BACKEND_IDS
 +                ),
-+                "dxvk_override": _selected_id(
-+                    self.combo_dxvk_override, self.dxvk_override_ids
-+                ),
++                **{f"{kind}_override": _selected_id(combo, self.graphics_override_ids[kind])
++                   for kind, combo, _model in self.__graphics_rows()},
 +                "sync_backend": _selected_id(
 +                    self.combo_sync_backend, SYNC_BACKEND_IDS
 +                ),
