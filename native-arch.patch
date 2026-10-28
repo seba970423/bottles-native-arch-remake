@@ -420,7 +420,7 @@ index 0000000..8b5405f
 +    native = f"{DXVK_OVERRIDE_KEYS}=n,b"
 +    environment["WINEDLLOVERRIDES"] = f"{existing};{native}" if existing else native
 diff --git a/bottles/backend/umu/executor.py b/bottles/backend/umu/executor.py
-index ac5264e..a0ac7db 100644
+index ac5264e..8cbefe3 100644
 --- a/bottles/backend/umu/executor.py
 +++ b/bottles/backend/umu/executor.py
 @@ -1,6 +1,7 @@
@@ -431,7 +431,7 @@ index ac5264e..a0ac7db 100644
  import signal
  import subprocess
  import sys
-@@ -15,6 +16,13 @@ from uuid import UUID
+@@ -15,6 +16,14 @@ from uuid import UUID
  from bottles.backend.globals import Paths
  from bottles.backend.managers.sandbox import SandboxManager
  from bottles.backend.umu.models import UmuGame
@@ -441,11 +441,12 @@ index ac5264e..a0ac7db 100644
 +from bottles.backend.umu.graphics import (
 +    configure_graphics_environment,
 +    custom_graphics_requested,
++    graphics_report_from_output,
 +)
  from bottles.backend.umu.processes import prefix_has_process
  from bottles.backend.umu.proton import UmuProtonCatalog
  from bottles.backend.umu.provider import UmuInstallation
-@@ -64,6 +72,13 @@ class UmuWinetricksError(ValueError):
+@@ -64,6 +73,13 @@ class UmuWinetricksError(ValueError):
  
  
  _WINETRICKS_VERB_PATTERN = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_-]*(=[a-zA-Z0-9]*)?$")
@@ -459,7 +460,15 @@ index ac5264e..a0ac7db 100644
  _SESSION_BUS_PREFIX = "unix:path="
  
  
-@@ -135,6 +150,39 @@ class UmuExecutor:
+@@ -117,6 +133,7 @@ class UmuExecutor:
+         self.base_environment = dict(environment)
+         self.proton_resolver = proton_resolver or UmuProtonCatalog.validate_value
+         self._processes: dict[UUID, _TrackedProcess] = {}
++        self._graphics_reports: dict[UUID, dict[str, str]] = {}
+         self._process_lock = threading.Lock()
+         self._runtime_lock = threading.Lock()
+         self._prepared_sandbox_runtimes: set[tuple[str, Path]] = set()
+@@ -135,6 +152,39 @@ class UmuExecutor:
      def _absolute_path(path: Path) -> Path:
          return path.expanduser().resolve(strict=False)
  
@@ -499,7 +508,7 @@ index ac5264e..a0ac7db 100644
      def _sandbox_proton(
          self, game: UmuGame, proton: str
      ) -> tuple[str, tuple[Path, ...]]:
-@@ -251,18 +299,173 @@ class UmuExecutor:
+@@ -251,18 +301,173 @@ class UmuExecutor:
              if game.working_directory
              else None
          )
@@ -678,10 +687,38 @@ index ac5264e..a0ac7db 100644
      def prepare_prefix(self, game: UmuGame) -> UmuCommand:
          environment, readable_paths = self._environment(game, prefix_only=True)
          return UmuCommand(
-@@ -411,6 +614,7 @@ class UmuExecutor:
+@@ -311,6 +516,13 @@ class UmuExecutor:
+                 sys.stdout.flush()
+             except (OSError, UnicodeError):
+                 pass
++            report = graphics_report_from_output(line)
++            if report:
++                with self._process_lock:
++                    if self._processes.get(game.id) is tracked:
++                        reports = self._graphics_reports.setdefault(game.id, {})
++                        if len(reports) < 8 or report[0] in reports:
++                            reports.setdefault(*report)
+             status = self._status_from_output(game, line)
+             if status is None:
+                 continue
+@@ -321,6 +533,12 @@ class UmuExecutor:
+                 ):
+                     tracked.status = status
+ 
++    def graphics_activity(self, game: UmuGame) -> tuple[bool, tuple[tuple[str, str], ...]]:
++        """Reports from this Bottles session, including game/launcher startup."""
++        running = self.is_tracked(game)
++        with self._process_lock:
++            return running, tuple(self._graphics_reports.get(game.id, {}).items())
++
+     @staticmethod
+     def _runtime_root(environment: Mapping[str, str]) -> Path:
+         if folders_path := environment.get("UMU_FOLDERS_PATH"):
+@@ -411,6 +629,8 @@ class UmuExecutor:
              )
              tracked = _TrackedProcess(process=process, pgid=process.pid)
              self._processes[game.id] = tracked
++            self._graphics_reports[game.id] = {}
 +            self._set_system76_foreground(game, process.pid)
              tracked.reader = threading.Thread(
                  target=self._read_output,
@@ -863,10 +900,10 @@ index 0000000..2607353
 +    return (*arguments, "--", *argv), reason
 diff --git a/bottles/backend/umu/graphics.py b/bottles/backend/umu/graphics.py
 new file mode 100644
-index 0000000..8b8754e
+index 0000000..1ae089e
 --- /dev/null
 +++ b/bottles/backend/umu/graphics.py
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,284 @@
 +"""Independent graphics component selection for managed UMU prefixes."""
 +
 +import hashlib
@@ -892,6 +929,33 @@ index 0000000..8b8754e
 +    "vkd3d": ("d3d12.dll",),
 +}
 +_OPTIONAL_DLLS = {"dxvk": ("d3d8.dll",), "vkd3d": ("d3d12core.dll",)}
++_VERSION_REPORT = re.compile(
++    r"^\s*info:\s+(DXVK|D7VK):\s+(v?\d[\w.+-]{0,63})\s*$"
++)
++_VKD3D_REPORT = re.compile(
++    r"^\s*(?:\d+\.\d+:)?(?:[0-9a-f]+:){1,3}"
++    r"(?:trace|info|fixme|warn|err):(?:vkd3d-proton:|vkd3d_[A-Za-z0-9_]+:)"
++)
++_WINED3D_REPORT = re.compile(
++    r"^\s*(?:\d+\.\d+:)?(?:[0-9a-f]+:){1,3}"
++    r"(?:trace|info|fixme|warn|err):(?:d3d|wined3d):wined3d_[A-Za-z0-9_]+:"
++)
++
++
++def graphics_report_from_output(line):
++    """Identify component messages, without claiming successful rendering or an API.
++
++    DXVK's shared DXGI can be loaded by D3D12, and launchers can use a different
++    renderer from their games. Only report what the output actually identifies.
++    """
++    version = _VERSION_REPORT.fullmatch(line.strip())
++    if version:
++        return f"{version[1]} {version[2]}", line.strip()[:300]
++    if _VKD3D_REPORT.match(line):
++        return "VKD3D", line.strip()[:300]
++    if _WINED3D_REPORT.match(line):
++        return "WineD3D", line.strip()[:300]
++    return None
 +
 +
 +def custom_graphics_requested(game):
@@ -1158,37 +1222,72 @@ index 6ff7c01..c26ea0b 100644
    '__init__.py',
    'main.py',
 diff --git a/bottles/frontend/ui/dialog-umu-game.blp b/bottles/frontend/ui/dialog-umu-game.blp
-index 78adbc1..20169fc 100644
+index 78adbc1..e9ae855 100644
 --- a/bottles/frontend/ui/dialog-umu-game.blp
 +++ b/bottles/frontend/ui/dialog-umu-game.blp
-@@ -117,6 +117,134 @@ template $UmuGameDialog: Adw.Dialog {
+@@ -114,9 +114,169 @@ template $UmuGameDialog: Adw.Dialog {
+         }
+       }
+ 
++      Adw.PreferencesGroup {
++        title: _("Graphics");
++        description: _("The game chooses its Direct3D API. Component versions apply only when that API is used.");
++
++        Adw.ActionRow row_graphics_activity {
++          title: _("Graphics Startup Reports");
++          subtitle: _("No runtime report yet. Start the game, then refresh.");
++          subtitle-lines: 3;
++
++          Button btn_graphics_details {
++            valign: center;
++            icon-name: "dialog-information-symbolic";
++            tooltip-text: _("View Graphics Reports");
++            sensitive: false;
++            styles ["flat"]
++          }
++
++          Button btn_graphics_refresh {
++            valign: center;
++            icon-name: "view-refresh-symbolic";
++            tooltip-text: _("Refresh Graphics Reports");
++            styles ["flat"]
++          }
++        }
++
++        Adw.ExpanderRow row_graphics_versions {
++          title: _("Component Version Overrides");
++          subtitle: _("Proton Defaults");
++          expanded: false;
++
++          Adw.ComboRow combo_d7vk_override {
++            title: _("Direct3D 3–7");
++            subtitle: _("D7VK version for older 3D games.");
++            subtitle-lines: 2;
++            enable-search: true;
++            model: StringList d7vk_overrides {};
++          }
++
++          Adw.ComboRow combo_dxvk_override {
++            title: _("Direct3D 8–11");
++            subtitle: _("DXVK version. WineD3D uses OpenGL and also disables VKD3D.");
++            subtitle-lines: 2;
++            enable-search: true;
++            model: StringList dxvk_overrides {};
++          }
++
++          Adw.ComboRow combo_vkd3d_override {
++            title: _("Direct3D 12");
++            subtitle: _("VKD3D version for Direct3D 12 games.");
++            subtitle-lines: 2;
++            enable-search: true;
++            model: StringList vkd3d_overrides {};
++          }
++        }
++      }
++
        Adw.PreferencesGroup {
          title: _("Launch");
  
-+        Adw.ComboRow combo_d7vk_override {
-+          title: _("D7VK");
-+          subtitle: _("Direct3D 3–7. Choose Proton's default or an installed component.");
-+          subtitle-lines: 2;
-+          enable-search: true;
-+          model: StringList d7vk_overrides {};
-+        }
-+
-+        Adw.ComboRow combo_dxvk_override {
-+          title: _("DXVK");
-+          subtitle: _("Direct3D 8–11. WineD3D uses OpenGL and also disables VKD3D.");
-+          subtitle-lines: 2;
-+          enable-search: true;
-+          model: StringList dxvk_overrides {};
-+        }
-+
-+        Adw.ComboRow combo_vkd3d_override {
-+          title: _("VKD3D");
-+          subtitle: _("Direct3D 12. Choose Proton's version or an installed component.");
-+          subtitle-lines: 2;
-+          enable-search: true;
-+          model: StringList vkd3d_overrides {};
-+        }
-+
 +        Adw.ComboRow combo_sync_backend {
 +          title: _("Synchronization");
 +          subtitle: _("The selected Proton runner may already enable NTSYNC automatically. Use overrides for compatibility testing.");
@@ -1641,7 +1740,7 @@ index bc14a8e..40db59a 100644
      # hide() and show() are essentialy workarounds to avoid keeping
      # the empty space of the hidden entry in the GtkFlowBox
 diff --git a/bottles/frontend/windows/umu.py b/bottles/frontend/windows/umu.py
-index 4ec2f72..fbd9ddb 100644
+index 4ec2f72..a0ae5ac 100644
 --- a/bottles/frontend/windows/umu.py
 +++ b/bottles/frontend/windows/umu.py
 @@ -14,7 +14,10 @@
@@ -1867,12 +1966,16 @@ index 4ec2f72..fbd9ddb 100644
              "source_mode": "imported" if importing else "installer",
          }
          if not importing:
-@@ -1415,6 +1551,34 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1415,6 +1551,38 @@ class UmuGameDialog(Adw.Dialog):
      entry_game_id = Gtk.Template.Child()
      combo_store = Gtk.Template.Child()
      stores = Gtk.Template.Child()
 +    combo_performance_backend = Gtk.Template.Child()
 +    performance_backends = Gtk.Template.Child()
++    row_graphics_activity = Gtk.Template.Child()
++    row_graphics_versions = Gtk.Template.Child()
++    btn_graphics_details = Gtk.Template.Child()
++    btn_graphics_refresh = Gtk.Template.Child()
 +    combo_dxvk_override = Gtk.Template.Child()
 +    dxvk_overrides = Gtk.Template.Child()
 +    combo_d7vk_override = Gtk.Template.Child()
@@ -1902,7 +2005,7 @@ index 4ec2f72..fbd9ddb 100644
      row_arguments = Gtk.Template.Child()
      row_working_directory = Gtk.Template.Child()
      btn_working_directory = Gtk.Template.Child()
-@@ -1448,6 +1612,71 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1448,6 +1616,71 @@ class UmuGameDialog(Adw.Dialog):
          )
          self.arguments = tuple(game.arguments)
          self.environment = dict(game.environment)
@@ -1974,7 +2077,7 @@ index 4ec2f72..fbd9ddb 100644
          self.switch_sandbox.set_active(game.sandbox)
          self.switch_network.set_active(game.share_net)
          self.installed_dependency_rows = []
-@@ -1456,6 +1685,12 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1456,6 +1689,12 @@ class UmuGameDialog(Adw.Dialog):
              self.stores.append(label)
          for label in _dependency_tool_labels():
              self.dependency_tools.append(label)
@@ -1987,7 +2090,7 @@ index 4ec2f72..fbd9ddb 100644
  
          self.entry_name.set_text(game.name)
          self.row_executable.set_subtitle(self.executable)
-@@ -1471,6 +1706,23 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1471,6 +1710,23 @@ class UmuGameDialog(Adw.Dialog):
          )
          self.entry_game_id.set_text(game.game_id)
          _select_id(self.combo_store, STORE_IDS, game.store)
@@ -2011,11 +2114,14 @@ index 4ec2f72..fbd9ddb 100644
          self.__update_arguments()
          self.__update_environment()
          self.__update_working_directory()
-@@ -1491,6 +1743,25 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1491,6 +1747,28 @@ class UmuGameDialog(Adw.Dialog):
          self.btn_executable.connect("clicked", self.__choose_executable)
          self.btn_prefix.connect("clicked", self.__prefix_action)
          self.btn_proton.connect("clicked", self.__choose_proton)
-+        self.combo_dxvk_override.connect("notify::selected", self.__update_graphics)
++        for _kind, combo, _model in self.__graphics_rows():
++            combo.connect("notify::selected", self.__update_graphics)
++        self.btn_graphics_refresh.connect("clicked", self.__update_graphics_activity)
++        self.btn_graphics_details.connect("clicked", self.__show_graphics_reports)
 +        self.switch_mangohud.connect("notify::active", self.__toggle_mangohud)
 +        self.switch_gamescope.connect("notify::active", self.__gamescope_changed)
 +        self.combo_gamescope_filter.connect(
@@ -2037,7 +2143,7 @@ index 4ec2f72..fbd9ddb 100644
          self.row_arguments.connect("activated", self.__choose_arguments)
          self.row_environment.connect("activated", self.__choose_environment)
          self.btn_working_directory.connect("clicked", self.__choose_working_directory)
-@@ -1504,12 +1775,35 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1504,11 +1782,82 @@ class UmuGameDialog(Adw.Dialog):
          self.combo_dependency_tool.connect(
              "notify::selected", self.__dependency_tool_changed
          )
@@ -2052,7 +2158,8 @@ index 4ec2f72..fbd9ddb 100644
          self.__validate_settings()
          self.__update_installed_dependencies()
          self.__dependency_tool_changed()
- 
++        self.__update_graphics_activity()
++
 +    def __graphics_rows(self):
 +        return (
 +            ("d7vk", self.combo_d7vk_override, self.d7vk_overrides),
@@ -2061,19 +2168,65 @@ index 4ec2f72..fbd9ddb 100644
 +        )
 +
 +    def __update_graphics(self, *_args):
++        overrides = [
++            f"{kind.upper()}: {_selected_id(combo, self.graphics_override_ids[kind])}"
++            for kind, combo, _model in self.__graphics_rows()
++            if _selected_id(combo, self.graphics_override_ids[kind]) != "proton"
++        ]
++        self.row_graphics_versions.set_subtitle(
++            "; ".join(overrides) if overrides else _("Proton Defaults")
++        )
 +        wined3d = _selected_id(
 +            self.combo_dxvk_override, self.graphics_override_ids["dxvk"]
 +        ) == "wined3d"
 +        self.combo_vkd3d_override.set_sensitive(self.prefix_managed and not wined3d)
 +        self.combo_vkd3d_override.set_subtitle(
 +            _("WineD3D disables VKD3D. Your selection applies when DXVK is restored.")
-+            if wined3d else _("Direct3D 12. Choose Proton's version or an installed component.")
++            if wined3d else _("VKD3D version for Direct3D 12 games.")
 +        )
 +
++    def __update_graphics_activity(self, *_args):
++        executor = self.window.manager.get_umu_executor(for_launch=False)
++        self.graphics_reports = ()
++        running = False
++        if executor is not None:
++            running, self.graphics_reports = executor.graphics_activity(self.game)
++        if self.graphics_reports:
++            components = ", ".join(name for name, _line in self.graphics_reports)
++            subtitle = (
++                _("Current launch reports: {0}. May include launchers; silent components are not listed.")
++                if running else _("Last launch reports: {0}. May include launchers; silent components are not listed.")
++            ).format(components)
++        else:
++            subtitle = _(
++                "No runtime report yet. Start the game, then refresh. "
++                "Version selections do not identify the active renderer."
++            )
++        self.row_graphics_activity.set_subtitle(subtitle)
++        self.btn_graphics_details.set_sensitive(bool(self.graphics_reports))
++
++    def __show_graphics_reports(self, *_args):
++        self.__update_graphics_activity()
++        if not self.graphics_reports:
++            return
++        evidence = "\n\n".join(
++            f"{name}\n{line}" for name, line in self.graphics_reports
++        )
++        dialog = Adw.AlertDialog.new(
++            _("Graphics Reports"),
++            _(
++                "These messages were observed in this Bottles session. They can "
++                "include launchers or failed initialization; they do not prove "
++                "which component is drawing the game's frames. DXVK may supply "
++                "DXGI alongside VKD3D for Direct3D 12.\n\n"
++            ) + evidence,
++        )
++        dialog.add_response("close", _("Close"))
++        dialog.present(self)
+ 
      def __update_installed_dependencies(self):
          dependencies = self.game.extra.get("installed_dependencies", [])
-         winetricks = self.game.extra.get("installed_winetricks", [])
-@@ -1545,10 +1839,22 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1545,10 +1894,22 @@ class UmuGameDialog(Adw.Dialog):
          self.row_installed_dependencies.set_subtitle(str(count))
  
      def __validate_settings(self, *_args):
@@ -2098,7 +2251,7 @@ index 4ec2f72..fbd9ddb 100644
          executable_valid = bool(self.executable)
          self.btn_save.set_sensitive(
              all(valid for _row, valid in rows) and executable_valid
-@@ -1654,6 +1960,58 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1654,6 +2015,58 @@ class UmuGameDialog(Adw.Dialog):
      def __set_proton(self, value, title):
          self.proton = value
          self.label_proton.set_label(title)
@@ -2157,7 +2310,7 @@ index 4ec2f72..fbd9ddb 100644
  
      def __choose_arguments(self, *_args):
          UmuArgumentsDialog(
-@@ -1662,6 +2020,167 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1662,6 +2075,167 @@ class UmuGameDialog(Adw.Dialog):
              self.__set_arguments,
          ).present(self)
  
@@ -2325,7 +2478,7 @@ index 4ec2f72..fbd9ddb 100644
      def __set_arguments(self, arguments):
          self.arguments = tuple(arguments)
          self.__update_arguments()
-@@ -1671,6 +2190,239 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1671,6 +2245,239 @@ class UmuGameDialog(Adw.Dialog):
              shlex.join(self.arguments) if self.arguments else _("None")
          )
  
@@ -2565,7 +2718,7 @@ index 4ec2f72..fbd9ddb 100644
      def __choose_environment(self, *_args):
          UmuEnvironmentDialog(
              self.window,
-@@ -1680,7 +2432,12 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1680,7 +2487,12 @@ class UmuGameDialog(Adw.Dialog):
  
      def __set_environment(self, environment):
          self.environment = dict(environment)
@@ -2578,7 +2731,7 @@ index 4ec2f72..fbd9ddb 100644
  
      def __update_environment(self):
          count = len(self.environment)
-@@ -1727,6 +2484,18 @@ class UmuGameDialog(Adw.Dialog):
+@@ -1727,6 +2539,18 @@ class UmuGameDialog(Adw.Dialog):
                  "dependency_tool": _selected_id(
                      self.combo_dependency_tool, DEPENDENCY_TOOL_IDS
                  ),

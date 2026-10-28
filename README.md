@@ -131,7 +131,8 @@ pacman's ownership database.
 ### Per-game D7VK, DXVK and VKD3D selection
 
 Managed UMU games expose three graphics component dropdowns under
-**Game Settings → Launch**, independently of the selected Proton runner:
+**Game Settings → Graphics → Component Version Overrides**, independently of
+the selected Proton runner:
 
 | Selector | Direct3D APIs | Choices |
 | --- | --- | --- |
@@ -144,6 +145,18 @@ Settings to select them. **Proton Default** retains the runner's own behavior
 and is the default for existing games. Selecting a component affects games
 using its Direct3D API; enabling D7VK or changing VKD3D does not accelerate a
 Direct3D 11 game.
+
+The component dropdowns configure versions; they do not indicate the active
+renderer. They are grouped under an expander and labeled by Direct3D API.
+**Graphics Startup Reports** shows messages observed in the current or last
+launch during this Bottles session. Run the game and use Refresh to update it;
+the information button shows the source messages. Each new launch clears its
+previous reports. No renderer is inferred from the selected versions.
+
+Startup reports can include launcher activity or failed initialization, and
+components with suppressed or unrecognized output may be absent. They do not
+prove which library is drawing the game's frames. DXVK can provide shared DXGI
+alongside VKD3D in a Direct3D 12 game, so observing both is valid.
 
 **WineD3D** uses Wine's OpenGL translation instead of DXVK. Proton's
 `PROTON_USE_WINED3D` switch also disables its VKD3D setup, so the VKD3D selector

@@ -30,6 +30,11 @@ for feature in \
   "${umu_game_blueprint}:combo_dxvk_override" \
   "${umu_game_blueprint}:combo_d7vk_override" \
   "${umu_game_blueprint}:combo_vkd3d_override" \
+  "${umu_game_blueprint}:row_graphics_activity" \
+  "${umu_game_blueprint}:row_graphics_versions" \
+  "${umu_dialog}:def __update_graphics_activity" \
+  "${umu_executor}:def graphics_activity" \
+  "${umu_graphics}:def graphics_report_from_output" \
   "${umu_dialog}:def __graphics_rows" \
   "${umu_dialog}:def __update_graphics" \
   "${umu_graphics}:class UmuD7vkOverride" \

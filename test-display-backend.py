@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dependency-free display and Gamescope regression tests against patched sources."""
+"""Dependency-free UMU display, graphics and Gamescope regression tests."""
 
 import ast
 import contextlib
@@ -71,7 +71,7 @@ def make_executor(root, environment):
         "wrap_gamescope": gamescope.wrap_gamescope,
     }
     graphics = load_graphics(root)
-    for key in ("configure_graphics_environment", "custom_graphics_requested", "UmuDxvkOverrideError"):
+    for key in ("configure_graphics_environment", "custom_graphics_requested", "UmuDxvkOverrideError", "graphics_report_from_output"):
         namespace[key] = getattr(graphics, key)
     exec(compile(module, "executor.py", "exec"), namespace)
     return namespace["UmuExecutor"](
@@ -615,6 +615,68 @@ class GraphicsTests(unittest.TestCase):
         for kind in ("d7vk", "dxvk", "vkd3d"):
             self.assertTrue(component.is_in_use(kind, "custom"))
             self.assertFalse(component.is_in_use(kind, "unused"))
+
+    def test_graphics_reports_identify_real_version_banners(self):
+        for component in ("DXVK", "D7VK"):
+            line = f"info:  {component}: v3.1.1-gplasync\n"
+            self.assertEqual(self.graphics.graphics_report_from_output(line),
+                             (f"{component} v3.1.1-gplasync", line.strip()))
+        for line in ("Bottles: DXVK: v3.1.1", "DXVK_HUD=version", "info: DXVK: No adapters found",
+                     "info: Game: d3d11.exe", "info: selected vkd3d-proton-3.0.1", "", "warn: DXVK: v1.0"):
+            self.assertIsNone(self.graphics.graphics_report_from_output(line))
+
+    def test_graphics_reports_handle_vkd3d_and_wined3d_debug_formats(self):
+        for line in ("012c:info:vkd3d_instance_init: vkd3d-proton startup",
+                     "12.032:0074:012c:fixme:vkd3d-proton:vkd3d_device_init: probe"):
+            self.assertEqual(self.graphics.graphics_report_from_output(line)[0], "VKD3D")
+        line = "00ac:fixme:d3d:wined3d_check_device_format: test"
+        self.assertEqual(self.graphics.graphics_report_from_output(line)[0], "WineD3D")
+        for line in ("info: VKD3D_DEBUG=info", "info: vkd3d_protonfiles = ['d3d12']",
+                     "00ac:fixme:d3d:unrelated_function: test"):
+            self.assertIsNone(self.graphics.graphics_report_from_output(line))
+
+    def test_output_reader_records_both_components_without_guessing_the_game_api(self):
+        game = self.game()
+        executor = make_executor(self.root, self.environment)
+        lines = ["info: DXVK: v3.1.1\n", "info: DXVK: v3.1.1\n",
+                 "0068:info:vkd3d_instance_init: startup\n"]
+        tracked = SimpleNamespace(process=SimpleNamespace(stdout=iter(lines)), status="preparing")
+        executor._processes[game.id] = tracked
+        with contextlib.redirect_stdout(io.StringIO()):
+            executor._read_output(game, tracked)
+        with patch.object(executor, "is_tracked", return_value=True):
+            running, reports = executor.graphics_activity(game)
+        self.assertTrue(running)
+        self.assertEqual([name for name, _line in reports], ["DXVK v3.1.1", "VKD3D"])
+        with patch.object(executor, "is_tracked", return_value=False):
+            self.assertEqual(executor.graphics_activity(game), (False, reports))
+
+    def test_configured_versions_do_not_become_runtime_reports(self):
+        game = self.game(d7vk_override="custom", dxvk_override="custom", vkd3d_override="custom")
+        executor = make_executor(self.root, self.environment)
+        with patch.object(executor, "is_tracked", return_value=True):
+            self.assertEqual(executor.graphics_activity(game), (True, ()))
+
+    def test_output_from_an_old_launch_cannot_contaminate_current_reports(self):
+        game = self.game()
+        executor = make_executor(self.root, self.environment)
+        old = SimpleNamespace(process=SimpleNamespace(stdout=iter(["info: DXVK: v1.0\n"])))
+        executor._processes[game.id] = object()
+        with contextlib.redirect_stdout(io.StringIO()):
+            executor._read_output(game, old)
+        self.assertFalse(executor._graphics_reports)
+
+    def test_new_launch_clears_previous_graphics_reports(self):
+        game = self.game()
+        executor = make_executor(self.root, self.environment)
+        executor._graphics_reports[game.id] = {"D7VK v1.0": "old report"}
+        namespace = executor._start.__func__.__globals__
+        namespace["prefix_has_process"] = lambda _prefix: False
+        process = SimpleNamespace(pid=12345)
+        command = SimpleNamespace(argv=("umu-run", "game.exe"), env={}, cwd=None)
+        with patch.object(subprocess, "Popen", return_value=process), patch.object(threading, "Thread"):
+            executor._start(game, command)
+        self.assertEqual(executor._graphics_reports[game.id], {})
 
 
 class GamescopeTests(unittest.TestCase):
